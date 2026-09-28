@@ -147,6 +147,20 @@ ollama pull gemma3:4b
 
 ## Usage
 
+### Guided CSV Import App
+
+From the project folder, start the app with:
+
+```bash
+uv run streamlit run app.py
+```
+
+Upload one or more bank statement CSVs, select the bank and account, and use the dropdowns to match the statement's columns to the standard transaction fields. Review the categorized transactions and download them as `all_banks_final_categorized.csv`.
+
+The download uses the same nine columns as the example file: `date`, `description`, `merchant`, `type`, `amount`, `main_category`, `sub_category`, `bank`, and `account`. Export dates use `MM/DD/YYYY`. Known descriptions use the existing merchant rules and cache; unrecognized descriptions are exported for later review. The app recognizes Capital One, Goldenwest Credit Union, and SoFi layouts. For a new bank, enter its name and select the matching columns; the app will validate the file and explain any missing or invalid values.
+
+### Existing Batch Processor
+
 1. Place CSV files from your banks into the `.data` folder, separated by bank.
 2. Adjust the `known_banks` and `account_types` lists in `bank_statement_processor.py` if needed.
 3. Run the script:
@@ -164,6 +178,7 @@ The script outputs all_banks_final_categorized.csv with the following columns:
 
 - date
 - description
+- merchant
 - type
 - amount
 - main_category

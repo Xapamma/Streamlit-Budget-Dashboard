@@ -7,6 +7,7 @@ import numpy as np
 description_map = {
     # --- RETAIL & SHOPPING ---
     r"wal\W*mart|wm superc|walmart": "Walmart Supercenter",
+    r"costco gas|costco fuel": "Costco Gas",
     r"costco whse|costco": "Costco Wholesale",
     r"amazon|amzn|amazon\.com|mktplace": "Amazon",
     r"ross stores|ross dress": "Ross",
@@ -53,7 +54,6 @@ description_map = {
     r"confiserie felicitas": "Confiserie Felicitas",
 
     # --- TRANSPORTATION & AUTO ---
-    r"costco gas|costco fuel": "Costco Gas",
     r"maverik|maverick": "Maverik",
     r"shell": "Shell",
     r"chevron": "Chevron",
