@@ -5,10 +5,10 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "numpy>=2.4.3",
-    "ollama>=0.6.1",
     "pandas>=3.0.1",
     "rapidfuzz>=3.14.3",
-    "regex>=2026.2.28",
     "streamlit>=1.45.0",
 ]
+
+[project.optional-dependencies]
+ai = ["ollama>=0.6.1"]

@@ -12,6 +12,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from cleaning_logic import add_categories, sub_category_map
 from final_export import (
     CATEGORY_LABEL_TO_PAIR,
     CATEGORY_PAIR_OPTIONS,
@@ -21,6 +22,8 @@ from final_export import (
     complete_missing_categories,
     format_final_export,
     get_final_export_row_issues,
+    load_merchant_cache,
+    merchant_needs_review,
     normalize_account_type,
     normalize_bank_name,
     normalize_export_filename,
@@ -28,6 +31,7 @@ from final_export import (
     split_filtered_transactions,
     validate_final_export_rows,
 )
+from merchant_assistance import approve_merchant_match, suggest_merchant_with_ollama
 from transaction_import import (
     ImportFormatError,
     STANDARD_COLUMNS,
@@ -607,6 +611,97 @@ if (
     st.session_state.editable_transactions = pd.concat(
         [edited_transactions, edited_source_metadata], axis=1
     )[EDITABLE_COLUMNS]
+
+    with st.expander("Optional AI merchant help", expanded=False):
+        st.caption("Ollama runs locally. It only receives a description when you request a suggestion; nothing is cached until you approve it.")
+        merchant_cache = load_merchant_cache()
+        candidate_rows = [
+            index
+            for index, row in st.session_state.editable_transactions.iterrows()
+            if merchant_needs_review(
+                str(row["description"]), str(row["merchant"]), merchant_cache
+            )
+        ]
+        if not candidate_rows:
+            st.info("No unresolved merchant matches need suggestions.")
+        else:
+            def suggestion_label(index: int) -> str:
+                row = st.session_state.editable_transactions.loc[index]
+                return f"{row['date']} | {row['merchant']} | {row['description']}"
+
+            suggestion_row = st.selectbox(
+                "Unmatched transaction",
+                candidate_rows,
+                format_func=suggestion_label,
+                key=f"ai_candidate_{st.session_state.export_editor_revision}",
+            )
+            suggestion_transaction = st.session_state.editable_transactions.loc[suggestion_row]
+            suggestion_description = str(suggestion_transaction["description"])
+            suggestion_fingerprint = hashlib.sha256(
+                f"{suggestion_row}|{suggestion_description}".encode("utf-8")
+            ).hexdigest()[:12]
+            suggestion_key = f"ai_merchant_suggestion_{suggestion_fingerprint}"
+            ai_model = st.text_input(
+                "Local Ollama model",
+                value="gemma3:4b",
+                key=f"ai_model_{st.session_state.export_editor_revision}",
+            ).strip()
+            if st.button("Suggest merchant with Ollama", key=f"suggest_{suggestion_fingerprint}"):
+                if not ai_model:
+                    st.error("Enter a local Ollama model name.")
+                else:
+                    try:
+                        with st.spinner("Asking local Ollama for a merchant suggestion..."):
+                            suggestion = suggest_merchant_with_ollama(
+                                suggestion_description, model=ai_model
+                            )
+                        st.session_state[suggestion_key] = {
+                            "description": suggestion_description,
+                            "merchant": suggestion,
+                        }
+                    except Exception as error:
+                        st.error(f"Ollama suggestion failed: {error}")
+
+            pending_suggestion = st.session_state.get(suggestion_key)
+            if pending_suggestion and pending_suggestion.get("description") == suggestion_description:
+                st.info(f"Suggested merchant: {pending_suggestion['merchant']}")
+                approve_col, dismiss_col = st.columns(2)
+                with approve_col:
+                    approve_clicked = st.button(
+                        "Approve and add to cache", type="primary", key=f"approve_{suggestion_fingerprint}"
+                    )
+                with dismiss_col:
+                    dismiss_clicked = st.button("Dismiss", key=f"dismiss_{suggestion_fingerprint}")
+
+                if approve_clicked:
+                    try:
+                        approved_merchant = pending_suggestion["merchant"]
+                        approve_merchant_match(suggestion_description, approved_merchant)
+                        updated = st.session_state.editable_transactions.copy()
+                        updated.at[suggestion_row, "merchant"] = approved_merchant
+                        if approved_merchant in sub_category_map:
+                            categories = add_categories(
+                                pd.DataFrame(
+                                    [{
+                                        "merchant": approved_merchant,
+                                        "amount": updated.at[suggestion_row, "amount"],
+                                        "description": updated.at[suggestion_row, "description"],
+                                    }]
+                                )
+                            ).iloc[0]
+                            updated.at[suggestion_row, "main_category"] = categories["main_category"]
+                            updated.at[suggestion_row, "sub_category"] = categories["sub_category"]
+                        st.session_state.editable_transactions = updated
+                        st.session_state.pop(suggestion_key, None)
+                        st.session_state.pop(f"export_editor_{st.session_state.export_editor_revision}", None)
+                        st.session_state.export_editor_revision += 1
+                        st.success("Approved merchant saved to merchant_cache.json.")
+                        st.rerun()
+                    except (OSError, ValueError) as error:
+                        st.error(f"Could not save the approved merchant: {error}")
+                elif dismiss_clicked:
+                    st.session_state.pop(suggestion_key, None)
+                    st.rerun()
 
     download_data, validation_error = validate_final_export_rows(edited_transactions)
     if pair_mismatch.any():

@@ -300,7 +300,7 @@ def split_filtered_transactions(
     return included, excluded
 
 
-def _load_merchant_cache(cache_path: str | Path | None) -> Mapping[str, str]:
+def load_merchant_cache(cache_path: str | Path | None = None) -> Mapping[str, str]:
     path = Path(cache_path) if cache_path is not None else Path(__file__).with_name("merchant_cache.json")
     if not path.exists():
         return {}
@@ -352,6 +352,28 @@ def _merchant_from_description(description: str, merchant_cache: Mapping[str, st
     return smart_title(description)
 
 
+def merchant_needs_review(
+    description: str,
+    merchant: str,
+    merchant_cache: Mapping[str, str] | None = None,
+) -> bool:
+    """Return true only when rules, cache and high-confidence fuzzy matches fail."""
+    if not description or not merchant:
+        return False
+    fallback_merchant = smart_title(description)
+    if merchant.strip().casefold() != fallback_merchant.casefold():
+        return False
+
+    cache = merchant_cache if merchant_cache is not None else load_merchant_cache()
+    cleaned = clean_description_for_matching(description)
+    if match_description_map(cleaned) or cleaned in cache:
+        return False
+    _, merchant_score = _fuzzy_match(cleaned, merchants_list)
+    _, cache_score = _fuzzy_match(cleaned, list(cache))
+    _, description_score = _fuzzy_match(cleaned, description_merchants)
+    return not (merchant_score > 96 or description_score >= 96 or cache_score > 96)
+
+
 def format_final_export(
     transactions: pd.DataFrame,
     *,
@@ -369,7 +391,7 @@ def format_final_export(
     if missing_columns:
         raise ValueError(f"Missing standardized transaction columns: {sorted(missing_columns)}.")
 
-    merchant_cache = _load_merchant_cache(merchant_cache_path)
+    merchant_cache = load_merchant_cache(merchant_cache_path)
     if apply_exclusions:
         result, _ = split_filtered_transactions(transactions)
     else:

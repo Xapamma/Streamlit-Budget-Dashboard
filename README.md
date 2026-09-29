@@ -1,145 +1,47 @@
 # Bank Statement Processor
 
-This repository contains a Python-based data pipeline that compiles, cleans, and categorizes bank transaction data from multiple financial institutions.
-
-The project transforms raw CSV exports into a structured dataset suitable for financial analysis by combining rule-based logic, fuzzy matching, and a local large language model (LLM).
+This project imports personal bank CSVs in a local Streamlit app, normalizes them to one transaction schema, applies merchant/category rules, and exports a categorized CSV. Optional local Ollama suggestions can help resolve unfamiliar merchants after the deterministic rules and cache.
 
 ---
 
-## Table of Contents
-- [Overview](#overview)
-- [Motivation](#motivation)
-- [Key Features](#key-features)
-- [Ethical Considerations](#ethical-considerations)
-- [Project Structure](#project-structure)
-- [Requirements](#requirements)
-- [Usage](#usage)
-- [Data Pipeline](#data-pipeline)
-- [Output Dataset](#output-dataset)
+## Features
 
----
+- Upload multiple bank CSVs and map each file's columns with dropdowns.
+- Select account type manually and choose the sign convention for single signed-amount columns.
+- Re-import a file with changed settings to replace that filename's rows; removing an upload removes its imported, edited, and excluded rows.
+- Review and edit dates, descriptions, merchants, amounts, categories, and transaction types before export.
+- Review declined, payment, and transfer rows with reasons; restore selected rows after validation.
+- Optionally request a local Ollama merchant suggestion for unresolved transactions and explicitly approve it into the local merchant cache.
+- Export the established nine-column categorized CSV format.
 
-## Overview
+## Privacy
 
-Bank transaction data is often messy, inconsistent, and difficult to analyze across multiple accounts. This project automates the process of:
-
-- Combining multiple bank CSV files  
-- Cleaning and standardizing transaction data  
-- Extracting merchant names  
-- Categorizing transactions into meaningful groups  
-
-The final output is a clean dataset that can be used for budgeting, analysis, or visualization.
-
----
-
-## Motivation
-
-This project was built to answer questions such as:
-
-- How much am I spending in each category?
-- Where can I reduce unnecessary expenses?
-- How can I automate financial tracking instead of doing it manually?
-
-Manually organizing bank data in spreadsheets is time-consuming and error-prone. This system reduces that effort significantly.
-
----
-
-## Key Features
-
-### Multi-Bank Integration
-
-- Supports multiple institutions (e.g., Goldenwest, SoFi, Capital One)
-- Automatically standardizes different CSV formats
-
-### Rule-Based Cleaning
-
-- Regex-based normalization of transaction descriptions
-- Handles bank-specific noise and formatting inconsistencies
-
-### Fuzzy Matching (RapidFuzz)
-
-- Matches similar or misspelled merchant names
-- Reduces duplicate merchant entries
-
-### LLM-Based Merchant Extraction (Ollama)
-
-- Uses a local large language model to extract merchant names when rules fail
-- Enforces structured JSON outputs for reliability
-
-### Merchant Caching System
-
-- Stores extracted merchants in `merchant_cache.json`
-- Prevents repeated LLM calls
-- Improves speed and consistency over time
-
-### Categorization Engine
-
-- Assigns transactions to sub-categories and main categories
-- Uses a predefined mapping system
-
-### Noise Filtering
-
-- Removes non-spending transactions such as:
-  - Internal transfers  
-  - Account payments  
-  - Round-ups  
-
----
-
-## Ethical Considerations
-
-This project uses personal financial data and follows responsible data practices:
-
-- All processing is done locally  
-- No private financial data is shared  
-- No APIs or scraping are used  
-- No sensitive information (e.g., account numbers) is included in outputs  
-
-If sharing this repository publicly, it is recommended to exclude raw financial data files.
-
----
+Bank data is sensitive. `.data/`, the generated categorized CSV, and `merchant_cache.json` are ignored and excluded from version control for new commits. The app processes CSV data locally. Ollama runs locally as well; it is not called unless the user requests a suggestion. Files previously pushed to a remote remain in Git history unless that history is separately rewritten.
 
 ## Project Structure
-- .data/ # Folder containing bank CSV files
-
-    - goldenwest/ # Bank-specific folders
-
-    - chase/
-
-    - ...
-
-- cleaning_logic.py # Cleaning + categorization logic
-
-- bank_statement_processor.py # Main pipeline script
-
-- bank_statement.py # Python script for cleaning and categorizing
-
-- merchant_cache.json # Cached merchant results (auto-generated)
-
-- all_banks_final_categorized.csv # Final output dataset
-
-- README.md
+- `app.py`: Streamlit CSV import, review, and export interface.
+- `transaction_import.py`: canonical transaction normalization and validation.
+- `final_export.py`: merchant resolution, exclusions, categories, validation, and export formatting.
+- `cleaning_logic.py`: merchant rules and category hierarchy.
+- `merchant_assistance.py`: optional Ollama suggestions and approved cache writes.
+- `tests/test_transaction_import.py`: importer/exporter regression tests.
+- `.data/`, `merchant_cache.json`, and `all_banks_final_categorized.csv`: local data/artifacts; ignored by Git.
 
 ---
 
-## Requirements
-- Python 3.10+
-- Libraries:
-  - `pandas`
-  - `numpy`
-  - `rapidfuzz`
-  - `ollama`
-  - `json` (standard library)
-  - `re` (standard library)
+## Setup
 
-### Additional Setup
+Requires Python 3.13 or later. Install the base app dependencies and launch:
 
-Install and run Ollama locally:
-
-👉 [Ollama Link](https://ollama.com)
-
-Then pull your model:
 ```bash
+uv sync
+uv run streamlit run app.py
+```
+
+Ollama is optional. To enable local merchant suggestions, install Ollama, then install the extra and pull the default model:
+
+```bash
+uv sync --extra ai
 ollama pull gemma3:4b
 ```
 
@@ -155,113 +57,16 @@ From the project folder, start the app with:
 uv run streamlit run app.py
 ```
 
-Upload one or more bank statement CSVs, select the bank and account, and use the dropdowns to match the statement's columns to the standard transaction fields. For a single signed amount column, choose whether positive values mean money in or money out; the default remains positive income and negative expenses. If the file has a Status column, map it under Optional columns; rows marked `declined` are skipped before date or amount validation and appear in the expandable excluded-transactions review with a reason. The same review lists filtered transfers and payments. Select Restore to add valid rows back to the export. Positive descriptions containing refund, return, or reimbursement are categorized as Income / Refunds. Edit descriptions, merchants, dates and amounts directly in the table. Type, account, bank and categories are selection-only. The subcategory dropdown prefixes each option with its main category, such as `Transportation :: Fuel`. Add or delete rows and choose a download filename. Invalid dates show an error, and incomplete or invalid rows block the export.
+Upload one or more bank statement CSVs, choose each file, select its account, and map the required columns. For a single signed amount column, choose whether positive values mean money in or money out. Map a Status column under Optional columns to exclude declined rows. Excluded transfers/payments have a review panel with a reason and a restore option. Positive descriptions containing refund/return/reimbursement wording are categorized as Income / Refunds.
 
 Removing an uploaded file removes all imported, edited, and excluded-review rows from that filename. Re-submitting the same filename with changed columns, sign convention, delimiter, or number format replaces its previous rows. Submitting an unchanged file with unchanged settings is blocked to avoid duplicates. Filenames must be unique among the currently uploaded statements.
 
 The download uses the same nine columns as the example file: `date`, `description`, `merchant`, `type`, `amount`, `main_category`, `sub_category`, `bank`, and `account`. Export dates use `MM/DD/YYYY`. Known descriptions use the existing merchant rules and cache; unrecognized descriptions are exported for later review. The app recognizes Capital One, Goldenwest Credit Union, and SoFi layouts. For a new bank, enter its name and select the matching columns; the app will validate the file and explain any missing or invalid values.
 
-### Existing Batch Processor
+The download columns are `date`, `description`, `merchant`, `type`, `amount`, `main_category`, `sub_category`, `bank`, and `account`. Dates export as `MM/DD/YYYY`.
 
-1. Place CSV files from your banks into the `.data` folder, separated by bank.
-2. Adjust the `known_banks` and `account_types` lists in `bank_statement_processor.py` if needed.
-3. Run the script:
+## Current Scope
 
-```bash
-python bank_statement_processor.py
-```
-4. Output will be saved as:
-
-```
-all_banks_final_categorized.csv
-```
-
-The script outputs all_banks_final_categorized.csv with the following columns:
-
-- date
-- description
-- merchant
-- type
-- amount
-- main_category
-- sub_category
-- bank
-- account
-
----
-
-## Data Pipeline
-
-The processing workflow follows a structured pipeline:
-
-1. **Load Data**
-   - Read CSV files from multiple banks
-   - Normalize column names
-
-2. **Standardize Data**
-   - Convert dates into consistent datetime format  
-   - Clean and normalize transaction amounts  
-
-3. **Clean Descriptions**
-   - Remove symbols, numbers, and bank-specific noise  
-   - Normalize text for matching  
-
-4. **Merchant Detection**
-   - Regex-based matching (fast, high-confidence)
-   - Fuzzy matching using RapidFuzz
-   - LLM fallback (Ollama) for unknown merchants  
-
-5. **Caching**
-   - Store results in `merchant_cache.json`
-   - Avoid repeated LLM calls  
-
-6. **Noise Filtering**
-   - Remove internal transfers and non-spending transactions  
-
-7. **Categorization**
-   - Assign sub-categories and main categories  
-
-8. **Export**
-   - Save final cleaned dataset  
-
----
-
-## Output Dataset
-
-The final dataset contains:
-
-- **500+ transactions (varies depending on input data)**
-- **9 features (columns):**
-
-| Column           | Description |
-|------------------|------------|
-| date             | Transaction date |
-| description      | Cleaned transaction description |
-| merchant         | Extracted merchant name |
-| type             | Debit or credit |
-| amount           | Transaction value |
-| main_category    | High-level category |
-| sub_category     | Detailed category |
-| bank             | Source bank |
-| account          | Account type |
-
----
-
-## Notes & Limitations
-
-- LLM outputs may occasionally be inconsistent  
-- New merchants must be processed once before being cached  
-- Some transactions may fall into "Other" categories  
-- Results depend on the quality and consistency of input data  
-- Dataset reflects personal spending, which introduces bias  
-
----
-
-## Future Improvements
-
-- Add embedding-based merchant clustering  
-- Improve categorization with machine learning models  
-- Build a dashboard for visualization  
-- Add user feedback loop for correcting classifications  
+This is an importer and categorized CSV exporter, not yet a persistent Mint-like budget dashboard. Imported data is held in the Streamlit session; restarting the app clears that session. A local database, spending trends, budgets, and account balances are future work.
 
 ---

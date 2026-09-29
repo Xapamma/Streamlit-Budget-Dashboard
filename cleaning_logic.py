@@ -1,6 +1,5 @@
 import re
 import pandas as pd
-import numpy as np
 
 # --- 1. DESCRIPTION CLEANING MAP ---
 # Patterns are lowercase here for easier matching

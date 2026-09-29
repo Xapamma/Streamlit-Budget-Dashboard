@@ -21,12 +21,14 @@ from final_export import (
     format_final_export,
     get_final_export_row_issues,
     get_exclusion_reason,
+    merchant_needs_review,
     normalize_account_type,
     normalize_export_filename,
     restored_rows_to_standardized,
     split_filtered_transactions,
     validate_final_export_rows,
 )
+from merchant_assistance import approve_merchant_match
 
 
 class LoadTransactionsTests(unittest.TestCase):
@@ -165,6 +167,22 @@ class LoadTransactionsTests(unittest.TestCase):
         self.assertEqual(original, same)
         self.assertNotEqual(original, changed_mapping)
         self.assertNotEqual(original, changed_number_format)
+
+    def test_approved_merchant_is_saved_and_no_longer_needs_ai_review(self):
+        cache_path = self.temp_path / "merchant_cache.json"
+        description = "ACME MARKET 1234"
+        merchant = "Acme Market"
+
+        cache_key = approve_merchant_match(description, merchant, cache_path=cache_path)
+
+        import json
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        self.assertEqual(cache[cache_key], merchant)
+        self.assertFalse(merchant_needs_review(description, merchant, cache))
+
+    def test_known_rule_matches_do_not_need_ai_review(self):
+        self.assertFalse(merchant_needs_review("WALMART SUPERCENTER #123", "Walmart Supercenter", {}))
+        self.assertTrue(merchant_needs_review("ACME MARKET 1234", "Acme Market 1234", {}))
 
     def test_custom_delimiter_is_supported(self):
         path = self.write_csv(
