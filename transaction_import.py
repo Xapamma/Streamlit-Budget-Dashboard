@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from pathlib import Path
 from typing import Mapping
@@ -13,6 +15,32 @@ class ImportFormatError(ValueError):
     """Raised when a bank CSV cannot be safely converted to the standard schema."""
 
 
+def build_import_signature(
+    content_digest: str,
+    *,
+    bank: str,
+    account: str,
+    column_mapping: Mapping[str, str],
+    delimiter: str,
+    decimal: str,
+    thousands: str | None,
+    positive_amounts_are_debits: bool,
+) -> str:
+    """Hash the file contents and every option that changes its interpretation."""
+    settings = {
+        "content_digest": content_digest,
+        "bank": bank,
+        "account": account,
+        "column_mapping": dict(column_mapping),
+        "delimiter": delimiter,
+        "decimal": decimal,
+        "thousands": thousands,
+        "positive_amounts_are_debits": positive_amounts_are_debits,
+    }
+    encoded = json.dumps(settings, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 STANDARD_COLUMNS = [
     "transaction_id",
     "date",
@@ -21,6 +49,7 @@ STANDARD_COLUMNS = [
     "amount",
     "transaction_type",
     "bank_category",
+    "status",
     "bank",
     "account",
     "currency",
@@ -93,6 +122,7 @@ _CANONICAL_MAPPING_KEYS = {
     "credit",
     "transaction_id",
     "bank_category",
+    "status",
     "currency",
 }
 
@@ -138,6 +168,27 @@ def _parse_amounts(
     return amounts
 
 
+def _parse_amounts_for_review(
+    values: pd.Series,
+    *,
+    decimal: str,
+    thousands: str | None,
+    source_rows: pd.Series,
+) -> pd.Series:
+    parsed = pd.Series(float("nan"), index=values.index, dtype="float64")
+    for index in values.index:
+        try:
+            parsed.loc[index] = _parse_amounts(
+                values.loc[[index]],
+                decimal=decimal,
+                thousands=thousands,
+                source_rows=source_rows.loc[[index]],
+            ).iloc[0]
+        except ImportFormatError:
+            pass
+    return parsed
+
+
 def _infer_account(path: Path) -> str:
     filename = path.stem.casefold()
     patterns = (
@@ -163,6 +214,7 @@ def load_transactions(
     decimal: str = ".",
     thousands: str | None = ",",
     delimiter: str = ",",
+    positive_amounts_are_debits: bool = False,
 ) -> pd.DataFrame:
     """Read one bank CSV and return rows using ``STANDARD_COLUMNS``.
 
@@ -233,7 +285,17 @@ def load_transactions(
         for field, source in mappings.items()
     }
 
-    source_rows = pd.Series(range(2, len(raw) + 2), index=raw.index)
+    original_source_rows = pd.Series(range(2, len(raw) + 2), index=raw.index)
+    declined_rows = pd.Series(False, index=raw.index)
+    if resolved.get("status"):
+        declined_rows = raw[resolved["status"]].str.contains(
+            r"\bdeclined\b", case=False, regex=True, na=False
+        )
+    declined_raw = raw.loc[declined_rows].copy()
+    declined_source_rows = original_source_rows.loc[declined_rows]
+    raw = raw.loc[~declined_rows].copy()
+
+    source_rows = pd.Series(raw.index + 2, index=raw.index)
     if has_amount:
         amounts = _parse_amounts(
             raw[resolved["amount"]],
@@ -265,6 +327,36 @@ def load_transactions(
             )
         amounts = -debit_values.abs().fillna(0) + credit_values.abs().fillna(0)
 
+    if positive_amounts_are_debits:
+        amounts = -amounts
+
+    if has_amount:
+        declined_amounts = _parse_amounts_for_review(
+            declined_raw[resolved["amount"]],
+            decimal=decimal,
+            thousands=thousands,
+            source_rows=declined_source_rows,
+        )
+    else:
+        declined_debits = _parse_amounts_for_review(
+            declined_raw[resolved["debit"]],
+            decimal=decimal,
+            thousands=thousands,
+            source_rows=declined_source_rows,
+        )
+        declined_credits = _parse_amounts_for_review(
+            declined_raw[resolved["credit"]],
+            decimal=decimal,
+            thousands=thousands,
+            source_rows=declined_source_rows,
+        )
+        valid_split = declined_debits.notna() ^ declined_credits.notna()
+        declined_amounts = (
+            -declined_debits.abs().fillna(0) + declined_credits.abs().fillna(0)
+        ).where(valid_split)
+    if positive_amounts_are_debits:
+        declined_amounts = -declined_amounts
+
     date_values = pd.to_datetime(raw[resolved["date"]].str.strip(), errors="coerce")
     invalid_dates = date_values.isna()
     if invalid_dates.any():
@@ -278,6 +370,45 @@ def load_transactions(
         raise ImportFormatError(f"Missing description on CSV row(s): {bad_rows}.")
 
     normalized_bank = adapter["bank"] if adapter is not None else requested_bank
+    declined_review = pd.DataFrame(index=declined_raw.index)
+    declined_review["transaction_id"] = (
+        declined_raw[resolved["transaction_id"]].replace("", pd.NA)
+        if resolved.get("transaction_id")
+        else pd.NA
+    )
+    declined_review["date"] = pd.to_datetime(
+        declined_raw[resolved["date"]].str.strip(), errors="coerce"
+    )
+    declined_review["posted_date"] = (
+        pd.to_datetime(declined_raw[resolved["posted_date"]].str.strip(), errors="coerce")
+        if resolved.get("posted_date")
+        else pd.NaT
+    )
+    declined_review["description"] = declined_raw[resolved["description"]].str.strip()
+    declined_review["amount"] = declined_amounts.astype("float64")
+    declined_review["transaction_type"] = declined_amounts.map(
+        lambda amount: "credit" if amount > 0 else "debit" if amount < 0 else "unknown"
+    )
+    declined_review["bank_category"] = (
+        declined_raw[resolved["bank_category"]].replace("", pd.NA)
+        if resolved.get("bank_category")
+        else pd.NA
+    )
+    declined_review["status"] = (
+        declined_raw[resolved["status"]].replace("", pd.NA)
+        if resolved.get("status")
+        else pd.NA
+    )
+    declined_review["bank"] = normalized_bank
+    declined_review["account"] = account or _infer_account(path)
+    declined_review["currency"] = (
+        declined_raw[resolved["currency"]].replace("", pd.NA)
+        if resolved.get("currency")
+        else currency
+    )
+    declined_review["source_file"] = path.name
+    declined_review["source_row"] = declined_source_rows
+
     result = pd.DataFrame(index=raw.index)
     result["transaction_id"] = (
         raw[resolved["transaction_id"]].replace("", pd.NA)
@@ -300,6 +431,11 @@ def load_transactions(
         if resolved.get("bank_category")
         else pd.NA
     )
+    result["status"] = (
+        raw[resolved["status"]].replace("", pd.NA)
+        if resolved.get("status")
+        else pd.NA
+    )
     result["bank"] = normalized_bank
     result["account"] = account or _infer_account(path)
     result["currency"] = (
@@ -310,7 +446,10 @@ def load_transactions(
     result["source_file"] = path.name
     result["source_row"] = source_rows
 
-    return result[STANDARD_COLUMNS].reset_index(drop=True)
+    result = result[STANDARD_COLUMNS].reset_index(drop=True)
+    result.attrs["declined_rows_dropped"] = int(declined_rows.sum())
+    result.attrs["declined_transactions"] = declined_review[STANDARD_COLUMNS].reset_index(drop=True)
+    return result
 
 
 def load_transaction_files(
@@ -321,3 +460,31 @@ def load_transaction_files(
         raise ValueError("At least one CSV path is required.")
     frames = [load_transactions(path, **options) for path in csv_paths]
     return pd.concat(frames, ignore_index=True)
+
+
+def remove_source_rows(
+    transactions: pd.DataFrame,
+    *,
+    source_column: str,
+    source_names: set[str],
+) -> pd.DataFrame:
+    """Remove session rows owned by uploads that are no longer present."""
+    if transactions.empty or source_column not in transactions:
+        return transactions.copy().reset_index(drop=True)
+    return transactions.loc[~transactions[source_column].isin(source_names)].reset_index(drop=True)
+
+
+def replace_source_rows(
+    existing: pd.DataFrame,
+    replacement: pd.DataFrame,
+    *,
+    source_column: str,
+    source_name: str,
+) -> pd.DataFrame:
+    """Replace all prior rows for a filename with its newly processed rows."""
+    retained = remove_source_rows(
+        existing,
+        source_column=source_column,
+        source_names={source_name},
+    )
+    return pd.concat([retained, replacement], ignore_index=True)

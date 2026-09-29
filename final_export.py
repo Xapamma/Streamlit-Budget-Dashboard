@@ -12,12 +12,15 @@ from rapidfuzz import fuzz, process
 
 from cleaning_logic import (
     add_categories,
+    category_hierarchy,
     clean_description_for_matching,
     description_merchants,
     match_description_map,
     merchants_list,
     smart_title,
+    sub_category_map,
 )
+from transaction_import import STANDARD_COLUMNS
 
 
 FINAL_EXPORT_COLUMNS = [
@@ -31,6 +34,25 @@ FINAL_EXPORT_COLUMNS = [
     "bank",
     "account",
 ]
+_HIERARCHY_SUBCATEGORIES = {
+    subcategory
+    for subcategories in category_hierarchy.values()
+    for subcategory in subcategories
+}
+_FALLBACK_SUBCATEGORIES = sorted((set(sub_category_map.values()) - _HIERARCHY_SUBCATEGORIES) | {"Other"})
+CATEGORY_SUBCATEGORIES = {
+    **category_hierarchy,
+    "General Spending": _FALLBACK_SUBCATEGORIES,
+    "Other Income": _FALLBACK_SUBCATEGORIES,
+}
+FINAL_MAIN_CATEGORY_OPTIONS = sorted(CATEGORY_SUBCATEGORIES)
+CATEGORY_PAIR_TO_LABEL = {
+    (main_category, sub_category): f"{main_category} :: {sub_category}"
+    for main_category, subcategories in CATEGORY_SUBCATEGORIES.items()
+    for sub_category in subcategories
+}
+CATEGORY_LABEL_TO_PAIR = {label: pair for pair, label in CATEGORY_PAIR_TO_LABEL.items()}
+CATEGORY_PAIR_OPTIONS = sorted(CATEGORY_LABEL_TO_PAIR)
 EXCLUDED_DESCRIPTION_FRAGMENTS = (
     "transfer to sofi",
     "to checking",
@@ -42,6 +64,7 @@ EXCLUDED_DESCRIPTION_FRAGMENTS = (
     "north capital",
     "internal transfer",
 )
+PAYMENT_LABEL_PATTERN = re.compile(r"\b(?:payments?|pymt|pmt)\b", re.IGNORECASE)
 
 
 def _normalize_label(value: str) -> str:
@@ -80,6 +103,201 @@ def normalize_bank_name(value: str) -> str:
         "sofi": "sofi",
     }
     return known_banks.get(normalized, value.strip().casefold())
+
+
+def normalize_export_filename(value: str) -> str:
+    """Return a safe basename with a CSV extension for the download."""
+    filename = Path(value.strip()).name or "all_banks_final_categorized.csv"
+    path = Path(filename)
+    if path.suffix.casefold() != ".csv":
+        filename = path.with_suffix(".csv").name if path.suffix else f"{filename}.csv"
+    return filename
+
+
+def validate_final_export_rows(
+    transactions: pd.DataFrame,
+) -> tuple[pd.DataFrame, str | None]:
+    """Drop fully blank editor rows and validate rows before CSV download."""
+    missing_columns = set(FINAL_EXPORT_COLUMNS) - set(transactions.columns)
+    if missing_columns:
+        raise ValueError(f"Missing final export columns: {sorted(missing_columns)}.")
+
+    result = transactions[FINAL_EXPORT_COLUMNS].copy()
+    if result.empty:
+        return result, "Add at least one complete transaction before downloading."
+
+    blank_rows = result.astype("string").apply(
+        lambda column: column.str.strip().eq("").fillna(True)
+    ).all(axis=1)
+    result = result.loc[~blank_rows].copy()
+    if result.empty:
+        return result, "Add at least one complete transaction before downloading."
+
+    problems = []
+    for column in FINAL_EXPORT_COLUMNS:
+        values = result[column].astype("string").str.strip()
+        if column == "amount":
+            amounts = pd.to_numeric(result[column], errors="coerce")
+            if amounts.isna().any():
+                problems.append("Amount must be a valid number on every row.")
+            else:
+                result[column] = amounts
+        elif column == "date":
+            dates = pd.to_datetime(values, format="%m/%d/%Y", errors="coerce")
+            if dates.isna().any():
+                problems.append("Date must use MM/DD/YYYY on every row.")
+            else:
+                result[column] = dates.dt.strftime("%m/%d/%Y")
+        elif values.isna().any() or values.eq("").any():
+            problems.append(f"{column.replace('_', ' ').title()} is required on every row.")
+
+    if problems:
+        return result, " ".join(problems)
+
+    invalid_types = ~result["type"].isin(["debit", "credit"])
+    if invalid_types.any():
+        problems.append("Type must be debit or credit on every row.")
+
+    invalid_categories = result.apply(
+        lambda row: row["sub_category"] not in CATEGORY_SUBCATEGORIES.get(row["main_category"], []),
+        axis=1,
+    )
+    if invalid_categories.any():
+        problems.append("Each sub-category must belong to its selected main category.")
+
+    if problems:
+        return result, " ".join(problems)
+    return result.reset_index(drop=True), None
+
+
+def get_final_export_row_issues(transactions: pd.DataFrame) -> dict[int, list[str]]:
+    """Return validation issues keyed by the row's current zero-based index."""
+    issues_by_row: dict[int, list[str]] = {}
+
+    def blank(value: object) -> bool:
+        return pd.isna(value) or not str(value).strip()
+
+    for index, row in transactions.iterrows():
+        if all(blank(row[column]) for column in FINAL_EXPORT_COLUMNS):
+            continue
+
+        issues = []
+        date_value = row["date"]
+        if blank(date_value) or pd.isna(
+            pd.to_datetime(str(date_value).strip(), format="%m/%d/%Y", errors="coerce")
+        ):
+            issues.append("Date must use MM/DD/YYYY.")
+
+        amount = pd.to_numeric(pd.Series([row["amount"]]), errors="coerce").iloc[0]
+        if pd.isna(amount):
+            issues.append("Amount must be a valid number.")
+
+        for column in (
+            "description", "merchant", "type", "main_category", "sub_category", "bank", "account"
+        ):
+            if blank(row[column]):
+                issues.append(f"{column.replace('_', ' ').title()} is required.")
+
+        if not blank(row["type"]) and row["type"] not in ("debit", "credit"):
+            issues.append("Type must be debit or credit.")
+
+        if not blank(row["main_category"]) and not blank(row["sub_category"]):
+            if row["sub_category"] not in CATEGORY_SUBCATEGORIES.get(row["main_category"], []):
+                issues.append("Sub-category does not belong to the selected main category.")
+
+        if issues:
+            issues_by_row[int(index)] = issues
+    return issues_by_row
+
+
+def restored_rows_to_standardized(
+    transactions: pd.DataFrame,
+    *,
+    statuses: pd.Series,
+    source_files: pd.Series,
+    source_rows: pd.Series,
+) -> tuple[pd.DataFrame, str | None]:
+    """Validate reviewed rows and convert them back to importer schema."""
+    validated, error = validate_final_export_rows(transactions)
+    if error:
+        return pd.DataFrame(columns=STANDARD_COLUMNS), error
+
+    restored = pd.DataFrame(index=range(len(validated)), columns=STANDARD_COLUMNS)
+    restored["transaction_id"] = pd.NA
+    restored["date"] = pd.to_datetime(validated["date"], format="%m/%d/%Y", errors="raise").reset_index(drop=True)
+    restored["posted_date"] = pd.NaT
+    restored["description"] = validated["description"].reset_index(drop=True)
+    restored["amount"] = validated["amount"].reset_index(drop=True).astype("float64")
+    restored["transaction_type"] = validated["type"].reset_index(drop=True)
+    restored["bank_category"] = pd.NA
+    restored["status"] = statuses.reset_index(drop=True)
+    restored["bank"] = validated["bank"].reset_index(drop=True)
+    restored["account"] = validated["account"].reset_index(drop=True)
+    restored["currency"] = pd.NA
+    restored["source_file"] = source_files.reset_index(drop=True)
+    restored["source_row"] = source_rows.reset_index(drop=True)
+    return restored, None
+
+
+def complete_missing_categories(transactions: pd.DataFrame) -> pd.DataFrame:
+    """Fill only blank category cells using the existing merchant rules."""
+    result = transactions.copy()
+    for index, row in result.iterrows():
+        missing_main = pd.isna(row["main_category"]) or not str(row["main_category"]).strip()
+        missing_sub = pd.isna(row["sub_category"]) or not str(row["sub_category"]).strip()
+        if not (missing_main or missing_sub):
+            continue
+        if pd.isna(row["merchant"]) or not str(row["merchant"]).strip():
+            continue
+        one_transaction = pd.DataFrame(
+            [{
+                "merchant": row["merchant"],
+                "amount": row["amount"],
+                "description": row["description"],
+            }]
+        )
+        categorized = add_categories(one_transaction).iloc[0]
+        if missing_main:
+            result.at[index, "main_category"] = categorized["main_category"]
+        if missing_sub:
+            result.at[index, "sub_category"] = categorized["sub_category"]
+    return result
+
+
+def get_exclusion_reason(transaction: pd.Series) -> str | None:
+    """Explain why a transaction is omitted from spending totals/export."""
+    status_value = transaction.get("status", "")
+    status = "" if pd.isna(status_value) else str(status_value)
+    if re.search(r"\bdeclined\b", status, re.IGNORECASE):
+        return "Bank status is Declined."
+
+    description_value = transaction.get("description", "")
+    description = "" if pd.isna(description_value) else str(description_value)
+    for fragment in EXCLUDED_DESCRIPTION_FRAGMENTS:
+        if fragment in description.casefold():
+            return f"Description matches the existing exclusion rule: {fragment}."
+
+    category_value = transaction.get("bank_category", "")
+    bank_category = "" if pd.isna(category_value) else str(category_value)
+    if PAYMENT_LABEL_PATTERN.search(bank_category):
+        return f"Bank category indicates a payment: {bank_category}."
+
+    known_merchant = match_description_map(clean_description_for_matching(description))
+    if not known_merchant and PAYMENT_LABEL_PATTERN.search(description):
+        return "Description contains a payment label, likely a card-payment transfer."
+    return None
+
+
+def split_filtered_transactions(
+    transactions: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Separate exportable rows from rows excluded by transaction rules."""
+    reasons = transactions.apply(get_exclusion_reason, axis=1)
+    excluded_mask = reasons.notna()
+    included = transactions.loc[~excluded_mask].copy()
+    excluded = transactions.loc[excluded_mask].copy()
+    excluded["removal_reason"] = reasons.loc[excluded_mask]
+    return included, excluded
 
 
 def _load_merchant_cache(cache_path: str | Path | None) -> Mapping[str, str]:
@@ -138,6 +356,7 @@ def format_final_export(
     transactions: pd.DataFrame,
     *,
     merchant_cache_path: str | Path | None = None,
+    apply_exclusions: bool = True,
 ) -> pd.DataFrame:
     """Create the same nine-column categorized schema as the example CSV.
 
@@ -150,13 +369,11 @@ def format_final_export(
     if missing_columns:
         raise ValueError(f"Missing standardized transaction columns: {sorted(missing_columns)}.")
 
-    descriptions = transactions["description"].astype("string")
-    excluded = pd.Series(False, index=transactions.index)
-    for fragment in EXCLUDED_DESCRIPTION_FRAGMENTS:
-        excluded |= descriptions.str.contains(fragment, case=False, regex=False, na=False)
-
     merchant_cache = _load_merchant_cache(merchant_cache_path)
-    result = transactions.loc[~excluded].copy()
+    if apply_exclusions:
+        result, _ = split_filtered_transactions(transactions)
+    else:
+        result = transactions.copy()
     if "merchant" not in result:
         result["merchant"] = result["description"].map(
             lambda description: _merchant_from_description(str(description), merchant_cache)
@@ -170,8 +387,14 @@ def format_final_export(
     result["type"] = result["transaction_type"]
     result["bank"] = result["bank"].map(normalize_bank_name)
     result["account"] = result["account"].map(normalize_account_type)
+    if result.empty:
+        result["main_category"] = pd.Series(index=result.index, dtype="string")
+        result["sub_category"] = pd.Series(index=result.index, dtype="string")
+        result["date"] = pd.to_datetime(result["date"], errors="raise").dt.strftime("%m/%d/%Y")
+        return result[FINAL_EXPORT_COLUMNS].copy()
+
     result = add_categories(result)
-    result["date"] = pd.to_datetime(result["date"], errors="raise")
+    result["date"] = pd.to_datetime(result["date"], errors="coerce")
     result = result.sort_values("date", kind="stable")
     result["date"] = result["date"].dt.strftime("%m/%d/%Y")
     return result[FINAL_EXPORT_COLUMNS].copy()

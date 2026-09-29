@@ -357,8 +357,13 @@ def add_categories(df):
         amt = row['amount']
         description = row['description']
 
-        # Determine Sub-Category
-        sub = sub_category_map.get(merchant, "Other")
+        # Positive bank credits explicitly described as refunds belong in Income.
+        is_refund = amt > 0 and re.search(
+            r"\b(?:refund(?:ed|s)?|return(?:ed)?|reimbursement|money back|credited back)\b",
+            str(description),
+            re.IGNORECASE,
+        )
+        sub = "Refunds" if is_refund else sub_category_map.get(merchant, "Other")
         
         # Determine Main Category with "General Spending" and "Other Income" fallbacks
         if sub in sub_to_main:
