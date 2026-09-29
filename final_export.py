@@ -43,7 +43,6 @@ _FALLBACK_SUBCATEGORIES = sorted((set(sub_category_map.values()) - _HIERARCHY_SU
 CATEGORY_SUBCATEGORIES = {
     **category_hierarchy,
     "General Spending": _FALLBACK_SUBCATEGORIES,
-    "Other Income": _FALLBACK_SUBCATEGORIES,
 }
 FINAL_MAIN_CATEGORY_OPTIONS = sorted(CATEGORY_SUBCATEGORIES)
 CATEGORY_PAIR_TO_LABEL = {

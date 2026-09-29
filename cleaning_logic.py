@@ -369,8 +369,10 @@ def add_categories(df):
             main = sub_to_main[sub]
         elif amt < 0:
             main = "General Spending"
+            sub = "Other"
         else:
-            main = "Other Income"
+            main = "Income"
+            sub = "Other Income"
         
         if description is None:
             return pd.Series([None, None, None])

@@ -17,6 +17,7 @@ from final_export import (
     CATEGORY_LABEL_TO_PAIR,
     CATEGORY_PAIR_OPTIONS,
     FINAL_EXPORT_COLUMNS,
+    FINAL_MAIN_CATEGORY_OPTIONS,
     complete_missing_categories,
     format_final_export,
     get_final_export_row_issues,
@@ -28,7 +29,14 @@ from final_export import (
     split_filtered_transactions,
     validate_final_export_rows,
 )
-from merchant_assistance import approve_merchant_match
+from merchant_assistance import (
+    approve_merchant_match,
+    load_merchant_cache,
+    merge_merchant_cache_edits,
+    save_merchant_cache,
+)
+from bank_profiles import load_bank_profiles, save_bank_profile
+from fuzzy_search import fuzzy_match_indices
 
 
 class LoadTransactionsTests(unittest.TestCase):
@@ -179,6 +187,55 @@ class LoadTransactionsTests(unittest.TestCase):
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
         self.assertEqual(cache[cache_key], merchant)
         self.assertFalse(merchant_needs_review(description, merchant, cache))
+
+    def test_cache_manager_updates_and_deletes_entries(self):
+        cache_path = self.temp_path / "merchant_cache.json"
+        save_merchant_cache({"coffee shop": "Coffee Shop", "old store": "Old Store"}, cache_path)
+        save_merchant_cache({"coffee shop": "New Coffee Name"}, cache_path)
+
+        self.assertEqual(load_merchant_cache(cache_path), {"coffee shop": "New Coffee Name"})
+
+    def test_cache_manager_rejects_blank_entries(self):
+        with self.assertRaisesRegex(ValueError, "cannot be blank"):
+            save_merchant_cache({"  ": "Merchant"}, self.temp_path / "merchant_cache.json")
+
+    def test_bank_profile_is_saved_and_updated(self):
+        profile_path = self.temp_path / "bank_profiles.json"
+        initial_profile = {
+            "delimiter": "Semicolon (;)",
+            "mapping": {"date": "Activity Date", "amount": "Net"},
+        }
+
+        save_bank_profile("New Bank", initial_profile, profile_path)
+        save_bank_profile(
+            "New Bank",
+            {**initial_profile, "mapping": {"date": "Date", "amount": "Amount"}},
+            profile_path,
+        )
+
+        profiles = load_bank_profiles(profile_path)
+        self.assertEqual(profiles["New Bank"]["mapping"], {"date": "Date", "amount": "Amount"})
+        self.assertEqual(profiles["New Bank"]["delimiter"], "Semicolon (;)")
+
+    def test_fuzzy_search_ignores_case_and_finds_typos(self):
+        values = ["Coffee Place", "KRAZY Plant Shop 34987"]
+
+        self.assertEqual(fuzzy_match_indices("krazy plnt", values), [1])
+        self.assertEqual(fuzzy_match_indices("COFFEE", values), [0])
+        self.assertEqual(fuzzy_match_indices("", values), [0, 1])
+
+    def test_cache_search_edits_preserve_hidden_entries(self):
+        current_cache = {"coffee shop": "Coffee Shop", "electric bill": "Power Utility"}
+
+        revised = merge_merchant_cache_edits(
+            current_cache,
+            {"coffee shop"},
+            [("coffee shop", "New Coffee Name")],
+        )
+        deleted = merge_merchant_cache_edits(current_cache, {"coffee shop"}, [])
+
+        self.assertEqual(revised, {"electric bill": "Power Utility", "coffee shop": "New Coffee Name"})
+        self.assertEqual(deleted, {"electric bill": "Power Utility"})
 
     def test_known_rule_matches_do_not_need_ai_review(self):
         self.assertFalse(merchant_needs_review("WALMART SUPERCENTER #123", "Walmart Supercenter", {}))
@@ -482,6 +539,18 @@ class LoadTransactionsTests(unittest.TestCase):
         self.assertIn("Transportation :: Fuel", CATEGORY_PAIR_OPTIONS)
         self.assertEqual(CATEGORY_LABEL_TO_PAIR["Transportation :: Fuel"], ("Transportation", "Fuel"))
         self.assertNotIn("Food & Dining :: Fuel", CATEGORY_PAIR_OPTIONS)
+        self.assertNotIn("Other Income", FINAL_MAIN_CATEGORY_OPTIONS)
+        self.assertIn("Income :: Other Income", CATEGORY_PAIR_OPTIONS)
+
+    def test_unclassified_positive_income_uses_income_main_category(self):
+        categorized = add_categories(
+            pd.DataFrame(
+                [{"merchant": "Unknown Merchant", "amount": 25.0, "description": "Deposit"}]
+            )
+        )
+
+        self.assertEqual(categorized.loc[0, "main_category"], "Income")
+        self.assertEqual(categorized.loc[0, "sub_category"], "Other Income")
 
     def test_missing_category_cells_use_existing_rules_without_overwriting_edits(self):
         transactions = pd.DataFrame(

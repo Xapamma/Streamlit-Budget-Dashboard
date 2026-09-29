@@ -4,3 +4,4 @@ __pycache__/
 .data/
 all_banks_final_categorized.csv
 merchant_cache.json
+bank_profiles.json

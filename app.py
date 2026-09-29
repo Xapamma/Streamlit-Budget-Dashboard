@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import importlib
 import io
 from html import escape
 import tempfile
@@ -12,8 +13,10 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from cleaning_logic import add_categories, sub_category_map
+from bank_profiles import load_bank_profiles, save_bank_profile
+from cleaning_logic import add_categories, clean_description_for_matching
 from final_export import (
+    CATEGORY_SUBCATEGORIES,
     CATEGORY_LABEL_TO_PAIR,
     CATEGORY_PAIR_OPTIONS,
     CATEGORY_PAIR_TO_LABEL,
@@ -31,7 +34,18 @@ from final_export import (
     split_filtered_transactions,
     validate_final_export_rows,
 )
-from merchant_assistance import approve_merchant_match, suggest_merchant_with_ollama
+import merchant_assistance
+
+if not hasattr(merchant_assistance, "merge_merchant_cache_edits"):
+    merchant_assistance = importlib.reload(merchant_assistance)
+
+from merchant_assistance import (
+    approve_merchant_match,
+    merge_merchant_cache_edits,
+    save_merchant_cache,
+    suggest_merchant_with_ollama,
+)
+from fuzzy_search import fuzzy_match_indices
 from transaction_import import (
     ImportFormatError,
     STANDARD_COLUMNS,
@@ -135,11 +149,13 @@ def column_picker(
     field: str,
     widget_key: str,
     optional: bool = False,
+    default_value: str | None = None,
 ) -> str | None:
     suggested = suggested_header(headers, field)
     placeholder = "Not used" if optional else "Choose a column"
     options = [placeholder, *headers]
-    index = headers.index(suggested) + 1 if suggested else 0
+    selected_default = default_value if default_value in headers else suggested
+    index = headers.index(selected_default) + 1 if selected_default else 0
     selection = st.selectbox(label, options, index=index, key=widget_key)
     return None if selection == placeholder else selection
 
@@ -179,6 +195,11 @@ def make_dropped_review_rows(
 st.set_page_config(page_title="Statement Import", page_icon="📄", layout="wide")
 st.title("Bank Statement Import")
 st.caption("Turn bank CSV exports into one consistent transaction table.")
+try:
+    bank_profiles = load_bank_profiles()
+except (OSError, ValueError) as error:
+    bank_profiles = {}
+    st.warning(f"Could not load saved bank formats: {error}")
 
 uploaded_files = st.file_uploader(
     "Add bank statement CSV files",
@@ -199,6 +220,10 @@ if "dropped_editor_revision" not in st.session_state:
     st.session_state.dropped_editor_revision = 0
 if "export_editor_revision" not in st.session_state:
     st.session_state.export_editor_revision = 0
+if "merchant_cache_editor_revision" not in st.session_state:
+    st.session_state.merchant_cache_editor_revision = 0
+if "ai_review_expanded" not in st.session_state:
+    st.session_state.ai_review_expanded = False
 if "editable_transactions" not in st.session_state:
     current_transactions = st.session_state.standardized_transactions
     initial_export = (
@@ -277,6 +302,34 @@ if uploaded_files:
     if duplicate_name:
         st.error("Two uploaded files have the same name. Remove or rename one so each statement can be tracked safely.")
     file_digest = hashlib.sha256(content).hexdigest()
+    detected_bank = detect_bank(selected_file.name)
+    custom_bank_names = sorted(
+        name for name in bank_profiles if name not in BANK_OPTIONS
+    )
+    bank_options = [*BANK_OPTIONS[:4], *custom_bank_names, BANK_OPTIONS[-1]]
+    detected_bank_choice = detected_bank if detected_bank in bank_options else BANK_OPTIONS[-1]
+    bank_key = f"bank_{file_digest[:12]}"
+    bank_index = bank_options.index(detected_bank_choice)
+    bank_choice = st.selectbox(
+        "Bank or credit union",
+        bank_options,
+        index=bank_index,
+        key=bank_key,
+    )
+    needs_custom_bank = bank_choice == "Other / new bank"
+    bank_name = (
+        st.text_input(
+            "Enter the bank name",
+            key=f"custom_bank_{file_digest[:12]}",
+            help="Save its format after mapping this CSV to add it to the bank menu.",
+        ).strip()
+        if needs_custom_bank
+        else detected_bank
+        if bank_choice == "Auto-detect from filename"
+        else bank_choice
+    )
+    bank_profile = bank_profiles.get(bank_name, {})
+    profile_scope = normalize_name(bank_name or bank_choice) or "newbank"
     detected_delimiter = detect_delimiter(content)
     delimiter_names = list(DELIMITER_OPTIONS)
     detected_label = next(
@@ -286,8 +339,12 @@ if uploaded_files:
     delimiter_label = st.selectbox(
         "Values are separated by",
         delimiter_names,
-        index=delimiter_names.index("Auto-detect"),
-        key=f"delimiter_{file_digest[:12]}",
+        index=delimiter_names.index(
+            bank_profile.get("delimiter")
+            if bank_profile.get("delimiter") in delimiter_names
+            else "Auto-detect"
+        ),
+        key=f"delimiter_{file_digest[:12]}_{profile_scope}",
         help=f"The detected separator is {detected_label}.",
     )
     delimiter = DELIMITER_OPTIONS[delimiter_label] or detected_delimiter
@@ -307,33 +364,28 @@ if uploaded_files:
         st.dataframe(preview, use_container_width=True, hide_index=True)
 
     st.subheader("2. Identify the account")
-    bank_index = BANK_OPTIONS.index(detect_bank(selected_file.name))
-    bank_choice = st.selectbox(
-        "Bank or credit union",
-        BANK_OPTIONS,
-        index=bank_index,
-        key=f"bank_{file_digest[:12]}",
+    account_default = str(bank_profile.get("account", ""))
+    normalized_account_default = normalize_account_type(account_default) if account_default else ""
+    account_default_index = next(
+        (
+            index
+            for index, option in enumerate(ACCOUNT_OPTIONS)
+            if option != "Other" and normalize_account_type(option) == normalized_account_default
+        ),
+        ACCOUNT_OPTIONS.index("Other") if account_default and normalized_account_default else 0,
     )
-    detected_bank = detect_bank(selected_file.name)
-    needs_custom_bank = bank_choice == "Other / new bank" or (
-        bank_choice == "Auto-detect from filename" and detected_bank == "Other / new bank"
-    )
-    bank_name = (
-        st.text_input("Enter the bank name", key=f"custom_bank_{file_digest[:12]}").strip()
-        if needs_custom_bank
-        else detected_bank
-        if bank_choice == "Auto-detect from filename"
-        else bank_choice
-    )
-
     account_choice = st.selectbox(
         "Account type",
         ACCOUNT_OPTIONS,
-        index=0,
-        key=f"account_{file_digest[:12]}",
+        index=account_default_index,
+        key=f"account_{file_digest[:12]}_{profile_scope}",
     )
     account_name = (
-        st.text_input("Enter the account type", key=f"custom_account_{file_digest[:12]}").strip()
+        st.text_input(
+            "Enter the account type",
+            value=account_default,
+            key=f"custom_account_{file_digest[:12]}_{profile_scope}",
+        ).strip()
         if account_choice == "Other"
         else None
         if account_choice == "Select an account type"
@@ -342,18 +394,36 @@ if uploaded_files:
 
     st.subheader("3. Match the columns")
     st.caption("Choose which column in this statement matches each field. Suggested matches are preselected when possible.")
-    key_prefix = file_digest[:12]
-    date_column = column_picker("Transaction date", headers, field="date", widget_key=f"date_{key_prefix}")
-    description_column = column_picker(
-        "Description", headers, field="description", widget_key=f"description_{key_prefix}"
+    key_prefix = f"{file_digest[:12]}_{profile_scope}"
+    profile_mapping = bank_profile.get("mapping", {})
+    if not isinstance(profile_mapping, dict):
+        profile_mapping = {}
+    date_column = column_picker(
+        "Transaction date",
+        headers,
+        field="date",
+        widget_key=f"date_{key_prefix}",
+        default_value=profile_mapping.get("date"),
     )
+    description_column = column_picker(
+        "Description",
+        headers,
+        field="description",
+        widget_key=f"description_{key_prefix}",
+        default_value=profile_mapping.get("description"),
+    )
+    amount_mode_options = ["One signed amount column", "Separate debit and credit columns"]
+    default_amount_mode = bank_profile.get("amount_mode", amount_mode_options[0])
     amount_mode = st.radio(
         "How are transaction amounts shown?",
-        ["One signed amount column", "Separate debit and credit columns"],
+        amount_mode_options,
+        index=amount_mode_options.index(default_amount_mode)
+        if default_amount_mode in amount_mode_options
+        else 0,
         horizontal=True,
         key=f"amount_mode_{key_prefix}",
     )
-    positive_amounts_are_debits = False
+    positive_amounts_are_debits = bool(bank_profile.get("positive_amounts_are_debits", False))
     if amount_mode == "One signed amount column":
         sign_convention = st.radio(
             "Amount sign convention",
@@ -361,6 +431,7 @@ if uploaded_files:
                 "Negative = money out; positive = money in",
                 "Positive = money out; negative = money in",
             ],
+            index=1 if positive_amounts_are_debits else 0,
             key=f"amount_sign_{key_prefix}",
             horizontal=True,
         )
@@ -375,7 +446,11 @@ if uploaded_files:
         mapping["description"] = description_column
     if amount_mode == "One signed amount column":
         amount_column = column_picker(
-            "Amount", headers, field="amount", widget_key=f"amount_{key_prefix}"
+            "Amount",
+            headers,
+            field="amount",
+            widget_key=f"amount_{key_prefix}",
+            default_value=profile_mapping.get("amount"),
         )
         if amount_column:
             mapping["amount"] = amount_column
@@ -383,11 +458,19 @@ if uploaded_files:
         left, right = st.columns(2)
         with left:
             debit_column = column_picker(
-                "Debit / money out", headers, field="debit", widget_key=f"debit_{key_prefix}"
+                "Debit / money out",
+                headers,
+                field="debit",
+                widget_key=f"debit_{key_prefix}",
+                default_value=profile_mapping.get("debit"),
             )
         with right:
             credit_column = column_picker(
-                "Credit / money in", headers, field="credit", widget_key=f"credit_{key_prefix}"
+                "Credit / money in",
+                headers,
+                field="credit",
+                widget_key=f"credit_{key_prefix}",
+                default_value=profile_mapping.get("credit"),
             )
         if debit_column:
             mapping["debit"] = debit_column
@@ -409,6 +492,7 @@ if uploaded_files:
                 field=field,
                 widget_key=f"{field}_{key_prefix}",
                 optional=True,
+                default_value=profile_mapping.get(field),
             )
             if source_column:
                 mapping[field] = source_column
@@ -416,10 +500,50 @@ if uploaded_files:
     number_format_label = st.selectbox(
         "Number format",
         list(NUMBER_FORMATS),
+        index=list(NUMBER_FORMATS).index(bank_profile["number_format"])
+        if bank_profile.get("number_format") in NUMBER_FORMATS
+        else 0,
         key=f"number_format_{key_prefix}",
         help="Choose the decimal and thousands separators used in the amount columns.",
     )
     decimal_separator, thousands_separator = NUMBER_FORMATS[number_format_label]
+
+    with st.expander("Save this bank's CSV format as the default", expanded=False):
+        st.caption(
+            "Save the delimiter, amount rules, account type, and column mappings for this bank. "
+            "The saved format stays on this computer and is selected automatically next time. "
+            "You can save defaults for Capital One, Goldenwest Credit Union, and SoFi too."
+        )
+        if st.button(
+            f"Save format for {bank_name or 'this bank'}",
+            key=f"save_bank_profile_{file_digest[:12]}_{profile_scope}",
+            disabled=(
+                not bank_name
+                or not account_name
+                or not date_column
+                or not description_column
+                or (
+                    "amount" not in mapping
+                    and not {"debit", "credit"}.issubset(mapping)
+                )
+            ),
+        ):
+            try:
+                save_bank_profile(
+                    bank_name,
+                    {
+                        "delimiter": delimiter_label,
+                        "amount_mode": amount_mode,
+                        "positive_amounts_are_debits": positive_amounts_are_debits,
+                        "number_format": number_format_label,
+                        "account": account_name or "",
+                        "mapping": mapping,
+                    },
+                )
+                st.success(f"Saved the default CSV format for {bank_name}.")
+                st.rerun()
+            except (OSError, ValueError) as error:
+                st.error(f"Could not save this bank format: {error}")
 
     current_signature = build_import_signature(
         file_digest,
@@ -548,6 +672,12 @@ if (
 ):
     transactions = st.session_state.standardized_transactions
     st.subheader("4. Review, edit and download")
+    st.info(
+        "Before downloading, check dates, signs and amounts, and confirm merchants and categories. "
+        "Merchant names and categories can be changed in the table or with the optional AI tool below. "
+        "Review transfers carefully: any transfer that was not caught by the rules should be deleted "
+        "from the table before export."
+    )
     st.caption("Edit descriptions, merchants, dates and amounts directly in the table. Type, account, bank and category are selection-only.")
     editable = complete_missing_categories(st.session_state.editable_transactions)
     st.session_state.editable_transactions = editable
@@ -557,6 +687,26 @@ if (
         CATEGORY_PAIR_TO_LABEL.get((str(main), str(sub)), "")
         for main, sub in zip(editable["main_category"], editable["sub_category"])
     ]
+    search_query = st.text_input(
+        "Search transactions",
+        placeholder="Description, merchant, category, amount...",
+        key="transaction_search",
+    ).strip()
+    previous_search_query = st.session_state.get("_previous_transaction_search")
+    if previous_search_query != search_query:
+        if previous_search_query is not None:
+            st.session_state.export_editor_revision += 1
+        st.session_state._previous_transaction_search = search_query
+    if search_query:
+        searchable_rows = [
+            " ".join(row)
+            for row in editor_data.astype("string").fillna("").to_numpy(dtype=str)
+        ]
+        matching_rows = fuzzy_match_indices(search_query, searchable_rows)
+        visible_editor_data = editor_data.iloc[matching_rows].copy()
+        st.caption(f"Showing {len(visible_editor_data):,} of {len(editor_data):,} transactions.")
+    else:
+        visible_editor_data = editor_data
     account_options = sorted(
         set(editable["account"].dropna().astype(str))
         | {"checking", "savings", "credit card", "money market", "gold account"}
@@ -566,9 +716,9 @@ if (
         | {normalize_bank_name(bank) for bank in transactions["bank"].dropna().astype(str)}
     )
     edited_editor_data = st.data_editor(
-        editor_data,
+        visible_editor_data,
         key=f"export_editor_{st.session_state.export_editor_revision}",
-        num_rows="dynamic",
+        num_rows="fixed" if search_query else "dynamic",
         use_container_width=True,
         hide_index=True,
         column_config={
@@ -592,6 +742,12 @@ if (
             "_source_row": None,
         },
     )
+    if search_query and not edited_editor_data.empty:
+        all_editor_data = editor_data.set_index("row_number")
+        all_editor_data.update(edited_editor_data.set_index("row_number"))
+        edited_editor_data = all_editor_data.reset_index()
+    elif search_query:
+        edited_editor_data = editor_data
     editor_row_numbers = edited_editor_data["row_number"].reset_index(drop=True)
     edited_source_metadata = edited_editor_data[EDITABLE_SOURCE_COLUMNS].reset_index(drop=True)
     edited_transactions = edited_editor_data.drop(
@@ -612,16 +768,33 @@ if (
         [edited_transactions, edited_source_metadata], axis=1
     )[EDITABLE_COLUMNS]
 
-    with st.expander("Optional AI merchant help", expanded=False):
+    merchant_cache = load_merchant_cache()
+    candidate_rows = [
+        index
+        for index, row in st.session_state.editable_transactions.iterrows()
+        if merchant_needs_review(
+            str(row["description"]), str(row["merchant"]), merchant_cache
+        )
+    ]
+    with st.expander(
+        f"Optional AI merchant help · {len(candidate_rows)} unresolved",
+        expanded=st.session_state.ai_review_expanded,
+    ):
         st.caption("Ollama runs locally. It only receives a description when you request a suggestion; nothing is cached until you approve it.")
-        merchant_cache = load_merchant_cache()
-        candidate_rows = [
-            index
-            for index, row in st.session_state.editable_transactions.iterrows()
-            if merchant_needs_review(
-                str(row["description"]), str(row["merchant"]), merchant_cache
+        with st.expander("Set up Ollama (optional)", expanded=False):
+            st.markdown(
+                "If Ollama is already installed, keep using it. Check `ollama list` for a downloaded model; "
+                "only pull `gemma3:4b` if it is missing. Install this app's optional AI dependency, "
+                "leave Ollama running, then press Suggest merchant with Ollama. Review and edit the "
+                "merchant and categories before approving. The app does not contact Ollama until you request a suggestion."
             )
-        ]
+            st.code(
+                "uv sync --extra ai\n"
+                "ollama list\n"
+                "ollama pull gemma3:4b  # only if the model is missing",
+                language="bash",
+            )
+            st.link_button("Ollama download and model information", "https://ollama.com/download")
         if not candidate_rows:
             st.info("No unresolved merchant matches need suggestions.")
         else:
@@ -647,6 +820,7 @@ if (
                 key=f"ai_model_{st.session_state.export_editor_revision}",
             ).strip()
             if st.button("Suggest merchant with Ollama", key=f"suggest_{suggestion_fingerprint}"):
+                st.session_state.ai_review_expanded = True
                 if not ai_model:
                     st.error("Enter a local Ollama model name.")
                 else:
@@ -664,7 +838,54 @@ if (
 
             pending_suggestion = st.session_state.get(suggestion_key)
             if pending_suggestion and pending_suggestion.get("description") == suggestion_description:
-                st.info(f"Suggested merchant: {pending_suggestion['merchant']}")
+                edited_suggestion = st.text_input(
+                    "Merchant suggestion (edit before approval)",
+                    value=pending_suggestion["merchant"],
+                    key=f"ai_merchant_edit_{suggestion_fingerprint}",
+                ).strip()
+
+                suggestion_category = add_categories(
+                    pd.DataFrame(
+                        [{
+                            "merchant": edited_suggestion or suggestion_transaction["merchant"],
+                            "amount": suggestion_transaction["amount"],
+                            "description": suggestion_description,
+                        }]
+                    )
+                ).iloc[0]
+                proposed_main = suggestion_category["main_category"]
+                if proposed_main not in FINAL_MAIN_CATEGORY_OPTIONS:
+                    proposed_main = str(suggestion_transaction["main_category"])
+                current_main = str(suggestion_transaction["main_category"])
+                main_index = (
+                    FINAL_MAIN_CATEGORY_OPTIONS.index(proposed_main)
+                    if proposed_main in FINAL_MAIN_CATEGORY_OPTIONS
+                    else FINAL_MAIN_CATEGORY_OPTIONS.index(current_main)
+                    if current_main in FINAL_MAIN_CATEGORY_OPTIONS
+                    else 0
+                )
+                category_fingerprint = hashlib.sha256(
+                    f"{suggestion_fingerprint}|{edited_suggestion}".encode("utf-8")
+                ).hexdigest()[:12]
+                selected_main = st.selectbox(
+                    "Suggested main category",
+                    FINAL_MAIN_CATEGORY_OPTIONS,
+                    index=main_index,
+                    key=f"ai_main_{category_fingerprint}",
+                )
+                subcategory_options = CATEGORY_SUBCATEGORIES[selected_main]
+                proposed_sub = suggestion_category["sub_category"]
+                if selected_main != proposed_main:
+                    proposed_sub = str(suggestion_transaction["sub_category"])
+                if proposed_sub not in subcategory_options:
+                    proposed_sub = subcategory_options[0]
+                selected_sub = st.selectbox(
+                    "Suggested sub-category",
+                    subcategory_options,
+                    index=subcategory_options.index(proposed_sub),
+                    key=f"ai_sub_{category_fingerprint}_{normalize_name(selected_main)}",
+                )
+
                 approve_col, dismiss_col = st.columns(2)
                 with approve_col:
                     approve_clicked = st.button(
@@ -675,24 +896,23 @@ if (
 
                 if approve_clicked:
                     try:
-                        approved_merchant = pending_suggestion["merchant"]
+                        if not edited_suggestion:
+                            st.error("Enter a merchant name before approving this suggestion.")
+                            st.stop()
+                        st.session_state.ai_review_expanded = True
+                        approved_merchant = edited_suggestion
                         approve_merchant_match(suggestion_description, approved_merchant)
                         updated = st.session_state.editable_transactions.copy()
                         updated.at[suggestion_row, "merchant"] = approved_merchant
-                        if approved_merchant in sub_category_map:
-                            categories = add_categories(
-                                pd.DataFrame(
-                                    [{
-                                        "merchant": approved_merchant,
-                                        "amount": updated.at[suggestion_row, "amount"],
-                                        "description": updated.at[suggestion_row, "description"],
-                                    }]
-                                )
-                            ).iloc[0]
-                            updated.at[suggestion_row, "main_category"] = categories["main_category"]
-                            updated.at[suggestion_row, "sub_category"] = categories["sub_category"]
+                        updated.at[suggestion_row, "main_category"] = selected_main
+                        updated.at[suggestion_row, "sub_category"] = selected_sub
                         st.session_state.editable_transactions = updated
                         st.session_state.pop(suggestion_key, None)
+                        st.session_state.merchant_cache_editor_revision += 1
+                        st.session_state.pop(
+                            f"merchant_cache_editor_{st.session_state.merchant_cache_editor_revision - 1}",
+                            None,
+                        )
                         st.session_state.pop(f"export_editor_{st.session_state.export_editor_revision}", None)
                         st.session_state.export_editor_revision += 1
                         st.success("Approved merchant saved to merchant_cache.json.")
@@ -700,8 +920,91 @@ if (
                     except (OSError, ValueError) as error:
                         st.error(f"Could not save the approved merchant: {error}")
                 elif dismiss_clicked:
+                    st.session_state.ai_review_expanded = True
                     st.session_state.pop(suggestion_key, None)
                     st.rerun()
+
+    with st.expander(f"Personal merchant cache · {len(merchant_cache):,} entries", expanded=False):
+        st.caption("Edit a merchant mapping directly, or delete its row and save. Cache keys are normalized transaction descriptions.")
+        cache_table = pd.DataFrame(
+            [
+                {"Description key": key, "Merchant": merchant, "_original_key": key}
+                for key, merchant in merchant_cache.items()
+            ],
+            columns=["Description key", "Merchant", "_original_key"],
+        )
+        cache_search = st.text_input(
+            "Search merchant cache",
+            placeholder="Merchant or transaction description",
+            key="merchant_cache_search",
+        ).strip()
+        previous_cache_search = st.session_state.get("_previous_merchant_cache_search")
+        if previous_cache_search != cache_search:
+            if previous_cache_search is not None:
+                st.session_state.merchant_cache_editor_revision += 1
+                st.session_state.pop(
+                    f"merchant_cache_editor_{st.session_state.merchant_cache_editor_revision - 1}",
+                    None,
+                )
+            st.session_state._previous_merchant_cache_search = cache_search
+        if cache_search:
+            cache_search_values = (
+                cache_table["Description key"].astype(str)
+                + " "
+                + cache_table["Merchant"].astype(str)
+            ).tolist()
+            cache_matches = fuzzy_match_indices(cache_search, cache_search_values)
+            visible_cache_table = cache_table.iloc[cache_matches].copy()
+            st.caption(f"Showing {len(visible_cache_table):,} of {len(cache_table):,} cache entries.")
+        else:
+            visible_cache_table = cache_table
+        edited_cache = st.data_editor(
+            visible_cache_table,
+            key=f"merchant_cache_editor_{st.session_state.merchant_cache_editor_revision}",
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Description key": st.column_config.TextColumn("Normalized description", required=True),
+                "Merchant": st.column_config.TextColumn("Merchant", required=True),
+                "_original_key": None,
+            },
+        )
+        if st.button("Save merchant cache changes", type="primary"):
+            visible_original_keys = set(visible_cache_table["_original_key"].dropna().astype(str))
+            edited_entries = []
+            cache_error = None
+            for _, cache_row in edited_cache.iterrows():
+                raw_description_key = cache_row["Description key"]
+                raw_merchant_name = cache_row["Merchant"]
+                description_key = clean_description_for_matching(
+                    "" if pd.isna(raw_description_key) else str(raw_description_key)
+                )
+                merchant_name = "" if pd.isna(raw_merchant_name) else str(raw_merchant_name).strip()
+                if not description_key and not merchant_name:
+                    continue
+                if not description_key or not merchant_name:
+                    cache_error = "Each cache row needs both a description key and a merchant."
+                    break
+                edited_entries.append((description_key, merchant_name))
+
+            if cache_error:
+                st.error(cache_error)
+            else:
+                try:
+                    revised_cache = merge_merchant_cache_edits(
+                        merchant_cache, visible_original_keys, edited_entries
+                    )
+                    save_merchant_cache(revised_cache)
+                    st.session_state.merchant_cache_editor_revision += 1
+                    st.session_state.pop(
+                        f"merchant_cache_editor_{st.session_state.merchant_cache_editor_revision - 1}",
+                        None,
+                    )
+                    st.success("Merchant cache saved. Unresolved count has been refreshed.")
+                    st.rerun()
+                except (OSError, ValueError) as error:
+                    st.error(f"Could not save the merchant cache: {error}")
 
     download_data, validation_error = validate_final_export_rows(edited_transactions)
     if pair_mismatch.any():
