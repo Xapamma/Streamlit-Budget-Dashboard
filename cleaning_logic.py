@@ -299,7 +299,7 @@ category_hierarchy = {
     "Savings & Investments": ["Dividends", "Investments", "Emergency Fund", "Retirement", "House Down Payment"],
     "Income": ["Paychecks", "Refunds", "CC Rewards", "Other Income", "Savings / Other Withdrawals"],
     "Miscellaneous": ["Fees & Charges", "Other Services"], 
-    "Vacations / Travel": ["Airfare", "Travel", "Lodging", "Food", "Entertainment", "Souvenirs"]    
+    "Vacations / Travel": ["Airfare", "Travel", "Lodging", "Souvenirs"]    
 }
 
 # Connects sub to main title

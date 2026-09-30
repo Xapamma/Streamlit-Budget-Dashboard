@@ -34,6 +34,7 @@ from final_export import (
     normalize_export_filename,
     restored_rows_to_standardized,
     split_filtered_transactions,
+    split_duplicate_transactions,
     validate_final_export_rows,
 )
 from merchant_assistance import (
@@ -951,6 +952,34 @@ class LoadTransactionsTests(unittest.TestCase):
         self.assertEqual(len(dropped), 3)
         self.assertTrue(dropped["removal_reason"].str.contains("payment", case=False).all())
         self.assertIn("Declined", get_exclusion_reason(pd.Series({"status": "Declined"})))
+
+    def test_exact_duplicate_transactions_are_excluded_for_review(self):
+        existing = pd.DataFrame(
+            [{
+                "date": "2026-06-01",
+                "description": "Coffee Shop Purchase",
+                "amount": -15.0,
+                "bank": "SoFi",
+                "account": "checking",
+            }]
+        )
+        incoming = pd.DataFrame(
+            [
+                {"date": "2026-06-01", "description": " coffee shop purchase ", "amount": -15.0, "bank": "sofi", "account": "checking"},
+                {"date": "2026-06-01", "description": "Coffee Shop Purchase", "amount": -16.0, "bank": "SoFi", "account": "checking"},
+                {"date": "2026-06-01", "description": "Coffee Shop Purchase", "amount": -15.0, "bank": "SoFi", "account": "savings"},
+                {"date": "2026-06-02", "description": "Coffee Shop Purchase", "amount": -15.0, "bank": "SoFi", "account": "checking"},
+                {"date": "2026-06-03", "description": "Market Purchase", "amount": -20.0, "bank": "SoFi", "account": "checking"},
+                {"date": "2026-06-03", "description": "Market Purchase", "amount": -20.0, "bank": "SoFi", "account": "checking"},
+            ]
+        )
+
+        included, duplicates = split_duplicate_transactions(incoming, existing)
+
+        self.assertEqual(len(included), 4)
+        self.assertEqual(len(duplicates), 2)
+        self.assertTrue(duplicates["removal_reason"].str.startswith("Duplicate entry:").all())
+        self.assertEqual(included.iloc[-1]["description"], "Market Purchase")
 
     def test_positive_refund_descriptions_are_categorized_as_income_refunds(self):
         transactions = pd.DataFrame(

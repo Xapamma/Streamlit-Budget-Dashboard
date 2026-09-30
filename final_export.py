@@ -324,6 +324,58 @@ def split_filtered_transactions(
     return included, excluded
 
 
+def split_duplicate_transactions(
+    transactions: pd.DataFrame,
+    existing_transactions: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Keep the first exact transaction and return later copies for review."""
+    if transactions.empty:
+        return transactions.copy(), transactions.assign(removal_reason=pd.Series(dtype="string"))
+
+    key_columns = {"date", "description", "amount", "bank", "account"}
+    if not key_columns.issubset(transactions.columns):
+        raise ValueError(f"Duplicate detection requires columns: {sorted(key_columns)}.")
+
+    def transaction_key(row: pd.Series) -> tuple | None:
+        transaction_date = pd.to_datetime(row["date"], errors="coerce")
+        amount = pd.to_numeric(pd.Series([row["amount"]]), errors="coerce").iloc[0]
+        if pd.isna(transaction_date) or pd.isna(amount):
+            return None
+        description = " ".join(str(row["description"]).split()).casefold()
+        if not description:
+            return None
+        return (
+            transaction_date.date(),
+            description,
+            float(amount),
+            normalize_bank_name(str(row["bank"])),
+            normalize_account_type(str(row["account"])),
+        )
+
+    seen = set()
+    if not existing_transactions.empty and key_columns.issubset(existing_transactions.columns):
+        for _, row in existing_transactions.iterrows():
+            key = transaction_key(row)
+            if key is not None:
+                seen.add(key)
+
+    duplicate_indices = []
+    for index, row in transactions.iterrows():
+        key = transaction_key(row)
+        if key is not None and key in seen:
+            duplicate_indices.append(index)
+        elif key is not None:
+            seen.add(key)
+
+    duplicate_mask = transactions.index.isin(duplicate_indices)
+    included = transactions.loc[~duplicate_mask].copy()
+    duplicates = transactions.loc[duplicate_mask].copy()
+    duplicates["removal_reason"] = (
+        "Duplicate entry: exact transaction already imported for this date, bank, and account."
+    )
+    return included, duplicates
+
+
 def load_merchant_cache(cache_path: str | Path | None = None) -> Mapping[str, str]:
     path = Path(cache_path) if cache_path is not None else Path(__file__).with_name("merchant_cache.json")
     if not path.exists():

@@ -19,7 +19,13 @@ from cleaning_logic import add_categories, clean_description_for_matching
 
 import final_export
 
-if not hasattr(final_export, "approve_transaction_category"):
+if not all(
+    hasattr(final_export, helper_name)
+    for helper_name in (
+        "approve_transaction_category",
+        "split_duplicate_transactions",
+    )
+):
     importlib.reload(final_export)
 
 from final_export import (
@@ -41,6 +47,7 @@ from final_export import (
     normalize_export_filename,
     make_transfer_review_rows,
     restored_rows_to_standardized,
+    split_duplicate_transactions,
     split_filtered_transactions,
     validate_final_export_rows,
 )
@@ -757,6 +764,20 @@ if uploaded_files:
                 if not declined.empty:
                     declined["source_file"] = selected_file.name
                 exportable, filtered = split_filtered_transactions(standardized)
+                existing_export = st.session_state.editable_transactions
+                if "_source_file" in existing_export.columns:
+                    existing_export = existing_export.loc[
+                        existing_export["_source_file"]
+                        .astype("string")
+                        .fillna("")
+                        .ne(selected_file.name)
+                    ]
+                exportable, duplicates = split_duplicate_transactions(
+                    exportable,
+                    existing_export,
+                )
+                if not duplicates.empty:
+                    filtered = pd.concat([filtered, duplicates], ignore_index=True)
                 new_export = format_final_export(exportable).reset_index(drop=True)
                 new_export["_source_file"] = selected_file.name
                 new_export["_source_row"] = (
