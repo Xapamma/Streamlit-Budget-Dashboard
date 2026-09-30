@@ -43,12 +43,18 @@ uv sync
 uv run streamlit run app.py
 ```
 
-Ollama is optional. To enable local merchant suggestions, install Ollama, then install the extra and pull the default model:
+Ollama is optional. To enable local suggestions and help chat on Windows:
+
+1. [Download Ollama for Windows](https://ollama.com/download/windows) and run the downloaded `OllamaSetup.exe` installer. Ollama runs in the background after installation.
+2. Open the project folder in VS Code and choose **Terminal → New Terminal**. PowerShell, Command Prompt, and Git Bash all work. Run the following from the project folder:
 
 ```bash
 uv sync --extra ai
-ollama pull gemma3:4b
+ollama --version
+ollama list
 ```
+
+If `ollama` is not recognized, close and reopen the terminal. The app defaults to `gemma3:4b`; `qwen3:8b` is an optional recommendation if your computer can run it. Both model fields accept any model tag installed in Ollama. Use `ollama pull <model-tag>` in the terminal only when the model you want is not listed by `ollama list`. See the [Ollama Windows installation guide](https://docs.ollama.com/windows) for troubleshooting.
 
 ---
 
@@ -68,7 +74,7 @@ Removing an uploaded file removes all imported, edited, and excluded-review rows
 
 The download uses the same nine columns as the example file: `date`, `description`, `merchant`, `type`, `amount`, `main_category`, `sub_category`, `bank`, and `account`. Export dates use `MM/DD/YYYY`. Before downloading, review dates, signs, amounts, merchants, and categories. Transfers not caught by the rules should be manually deleted from the preview. Search the editable transaction preview and merchant cache by text; searches ignore case and tolerate typos, and filtering does not remove hidden transactions or cache entries. Known descriptions use the existing merchant rules and cache; unrecognized descriptions are exported for later review. For an unresolved transaction, the optional Ollama tool suggests a merchant and a main/subcategory from the app's allowed choices. Known merchant rules take precedence; for a new merchant, the AI category pair is preselected. Both remain editable before approval updates the preview and local cache. The unresolved count updates as matches are approved. The Personal merchant cache panel lets you add, edit, and delete cached mappings, then save them locally.
 
-To enable Ollama suggestions, install Ollama if needed and run `uv sync --extra ai`. Check available local models with `ollama list`; only run `ollama pull gemma3:4b` if that model is not already listed. Leave Ollama running, then request a suggestion in the app. The optional setup instructions and Ollama download link are also available in the app. Suggestions are requested only when you press the button; approved matches are saved locally.
+To use Ollama, check available local models with `ollama list` in a terminal. The current default is `gemma3:4b`, and `qwen3:8b` is a recommended alternative. Both the help chat and merchant-suggestion model fields accept any installed model tag. Pull a model only if you choose it and it is not already listed. Leave Ollama running, then request a suggestion in the app. The optional setup instructions and Ollama download link are also available in the app. Suggestions are requested only when you press the button; approved matches are saved locally.
 
 The download columns are `date`, `description`, `merchant`, `type`, `amount`, `main_category`, `sub_category`, `bank`, and `account`. Dates export as `MM/DD/YYYY`.
 

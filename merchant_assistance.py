@@ -198,9 +198,14 @@ preview and cache. The cache editor supports search, add, edit, delete, and save
 Privacy: this help chat receives only the user's question and recent help-chat turns.
 It cannot see uploaded files, transactions, or the merchant cache. Do not ask users to
 paste account numbers, transaction descriptions, or other financial details. The chat
-and its history are kept only in the current Streamlit session. Ollama is optional;
-install it with `uv sync --extra ai`, run `ollama list`, and pull `gemma3:4b` only if
-that model is not already installed."""
+and its history are kept only in the current Streamlit session. To install on Windows,
+download and run the OllamaSetup.exe installer from https://ollama.com/download/windows.
+Ollama runs in the background after installation. Then open a terminal in the project
+folder (VS Code Terminal > New Terminal, PowerShell, Command Prompt, or Git Bash), and
+run `uv sync --extra ai`, `ollama --version`, and `ollama list`. Close and reopen the
+terminal after installing Ollama if the command is not found. The model fields accept
+any installed Ollama model tag. The app defaults to `gemma3:4b`; `qwen3:8b` is an
+optional recommendation if the computer can run it. Pull only a model that is missing."""
 
 
 def ask_ollama_app_help(

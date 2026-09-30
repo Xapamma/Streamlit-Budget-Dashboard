@@ -313,16 +313,37 @@ with st.sidebar:
         )
         with st.expander("Ollama setup", expanded=False):
             st.markdown(
-                "Install the optional dependency, make sure Ollama is running, and use an "
-                "installed model. The chat and its history are cleared when this app session ends."
+                "**1. Install Ollama for Windows.** Download and run the installer. Ollama "
+                "then runs in the background. After installation, close and reopen your terminal "
+                "so the `ollama` command is available."
+            )
+            st.link_button("Download Ollama for Windows", "https://ollama.com/download/windows")
+            st.link_button("Ollama Windows installation guide", "https://docs.ollama.com/windows")
+            st.markdown(
+                "**2. Open a terminal in this project.** In VS Code, choose **Terminal → New Terminal**. "
+                "PowerShell, Command Prompt, and Git Bash all work. Make sure the terminal is in the "
+                "project folder before running these commands:"
             )
             st.code(
                 "uv sync --extra ai\n"
-                "ollama list\n"
-                "ollama pull gemma3:4b  # only if the model is missing",
+                "ollama --version\n"
+                "ollama list",
                 language="bash",
             )
-            st.link_button("Ollama download", "https://ollama.com/download")
+            st.markdown(
+                "**3. Download a model if needed.** The app currently defaults to `gemma3:4b`; "
+                "`qwen3:8b` is an optional recommendation if your computer can run it. Check "
+                "`ollama list` first and pull only the model you want if it is not already listed. "
+                "Both model fields accept any installed Ollama model tag."
+            )
+            st.code(
+                "ollama pull gemma3:4b  # current app default, only if missing\n"
+                "ollama pull qwen3:8b   # optional alternative, only if missing",
+                language="bash",
+            )
+            st.caption(
+                "The sidebar chat history is temporary and is cleared when this app session ends."
+            )
 
         for chat_message in st.session_state.app_help_chat_messages[-12:]:
             with st.chat_message(chat_message["role"]):
@@ -869,18 +890,14 @@ if (
         st.caption("Ollama runs locally. When requested, it receives only the selected description and amount plus allowed categories. Nothing is saved until you approve.")
         with st.expander("Set up Ollama (optional)", expanded=False):
             st.markdown(
-                "If Ollama is already installed, keep using it. Check `ollama list` for a downloaded model; "
-                "only pull `gemma3:4b` if it is missing. Install this app's optional AI dependency, "
-                "leave Ollama running, then press Suggest merchant with Ollama. Review and edit the "
-                "merchant and categories before approving. The app does not contact Ollama until you request a suggestion."
+                "For Windows installation and terminal instructions, open **Ask the app → Ollama setup** "
+                "in the sidebar. In short: install Ollama, open a terminal in this project, run "
+                "`uv sync --extra ai`, and make sure the model shown in the model field is installed. "
+                "Both model fields accept any installed model tag. The current default is `gemma3:4b`; "
+                "`qwen3:8b` is an optional alternative. Leave Ollama running, then press Suggest merchant "
+                "with Ollama. Review and edit the merchant and categories before approving."
             )
-            st.code(
-                "uv sync --extra ai\n"
-                "ollama list\n"
-                "ollama pull gemma3:4b  # only if the model is missing",
-                language="bash",
-            )
-            st.link_button("Ollama download and model information", "https://ollama.com/download")
+            st.link_button("Download Ollama for Windows", "https://ollama.com/download/windows")
         if not candidate_rows:
             st.info("No unresolved merchant matches need suggestions.")
         else:
