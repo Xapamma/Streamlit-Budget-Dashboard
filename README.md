@@ -12,6 +12,7 @@ This project imports personal bank CSVs in a local Streamlit app, normalizes the
 - Review and edit dates, descriptions, merchants, amounts, categories, and transaction types before export.
 - Review declined, payment, and transfer rows with reasons; restore selected rows after validation.
 - Optionally request a local Ollama merchant suggestion for unresolved transactions and explicitly approve it into the local merchant cache.
+- Ask app-usage questions in the sidebar's local Ollama help chat; it only receives the question and a short help conversation, not imported transaction data.
 - Save a reusable CSV format for each bank, including custom banks, so future imports reuse its delimiter, amount rules, account type, and column mapping.
 - Search transactions and the merchant cache with case-insensitive fuzzy matching.
 - Export the established nine-column categorized CSV format.

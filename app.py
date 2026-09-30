@@ -42,6 +42,7 @@ if (
         for helper_name in (
             "merge_merchant_cache_edits",
             "suggest_merchant_and_category_with_ollama",
+            "ask_ollama_app_help",
         )
     )
     or getattr(merchant_assistance, "MAX_OLLAMA_SUGGESTION_ATTEMPTS", 0) < 5
@@ -49,6 +50,7 @@ if (
     merchant_assistance = importlib.reload(merchant_assistance)
 
 from merchant_assistance import (
+    ask_ollama_app_help,
     approve_merchant_match,
     merge_merchant_cache_edits,
     save_merchant_cache,
@@ -233,6 +235,10 @@ if "merchant_cache_editor_revision" not in st.session_state:
     st.session_state.merchant_cache_editor_revision = 0
 if "ai_review_expanded" not in st.session_state:
     st.session_state.ai_review_expanded = False
+if "app_help_chat_messages" not in st.session_state:
+    st.session_state.app_help_chat_messages = []
+if "app_help_chat_expanded" not in st.session_state:
+    st.session_state.app_help_chat_expanded = False
 if "editable_transactions" not in st.session_state:
     current_transactions = st.session_state.standardized_transactions
     initial_export = (
@@ -296,6 +302,77 @@ with st.sidebar:
         st.session_state.export_editor_revision += 1
         st.session_state.dropped_editor_revision += 1
         st.rerun()
+
+    with st.expander(
+        "Ask the app (local Ollama)",
+        expanded=st.session_state.app_help_chat_expanded,
+    ):
+        st.caption(
+            "Ask how to import, review, categorize, or export. This chat only sends your "
+            "question and recent chat messages to local Ollama. Do not include financial details."
+        )
+        with st.expander("Ollama setup", expanded=False):
+            st.markdown(
+                "Install the optional dependency, make sure Ollama is running, and use an "
+                "installed model. The chat and its history are cleared when this app session ends."
+            )
+            st.code(
+                "uv sync --extra ai\n"
+                "ollama list\n"
+                "ollama pull gemma3:4b  # only if the model is missing",
+                language="bash",
+            )
+            st.link_button("Ollama download", "https://ollama.com/download")
+
+        for chat_message in st.session_state.app_help_chat_messages[-12:]:
+            with st.chat_message(chat_message["role"]):
+                st.markdown(chat_message["content"])
+
+        help_model = st.text_input(
+            "Local help model",
+            value="gemma3:4b",
+            key="app_help_model",
+        ).strip()
+        with st.form("app_help_chat_form", clear_on_submit=True):
+            help_question = st.text_input(
+                "Ask a question",
+                placeholder="How do I save a bank format?",
+            )
+            ask_submitted = st.form_submit_button("Send question", use_container_width=True)
+
+        if ask_submitted:
+            question = help_question.strip()
+            if not question:
+                st.warning("Enter a question about using the app.")
+            elif not help_model:
+                st.warning("Enter the name of a local Ollama model.")
+            else:
+                st.session_state.app_help_chat_expanded = True
+                messages = st.session_state.app_help_chat_messages
+                messages.append({"role": "user", "content": question})
+                try:
+                    with st.spinner("Ollama is answering..."):
+                        answer = ask_ollama_app_help(
+                            question,
+                            messages[:-1],
+                            model=help_model,
+                        )
+                except Exception as error:
+                    error_text = str(error)
+                    if "Ollama support is optional" in error_text:
+                        answer = (
+                            "Ollama support is not installed yet. Run `uv sync --extra ai`, "
+                            "then retry your question."
+                        )
+                    else:
+                        answer = (
+                            "I couldn't reach that Ollama model. Check that Ollama is running "
+                            "and the model is installed with `ollama list`, then try again. "
+                            f"Details: {error_text}"
+                        )
+                messages.append({"role": "assistant", "content": answer})
+                st.session_state.app_help_chat_messages = messages[-12:]
+                st.rerun()
 
 if uploaded_files:
     st.subheader("1. Choose a statement")

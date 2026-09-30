@@ -34,6 +34,7 @@ from final_export import (
 )
 from merchant_assistance import (
     approve_merchant_match,
+    ask_ollama_app_help,
     load_merchant_cache,
     merge_merchant_cache_edits,
     save_merchant_cache,
@@ -350,8 +351,30 @@ class LoadTransactionsTests(unittest.TestCase):
                 suggest_merchant_and_category_with_ollama(
                     "UNRECOGNIZED XYZ", -19.0, {"Shopping & Supplies": ["General Retail"]}
                 )
-
         self.assertEqual(len(calls), 5)
+
+    def test_app_help_chat_uses_only_bounded_help_history(self):
+        captured = {}
+        fake_ollama = SimpleNamespace(
+            chat=lambda **kwargs: (
+                captured.update(kwargs)
+                or {"message": {"content": "Choose your bank and map the columns."}}
+            )
+        )
+        history = [
+            {"role": "user" if index % 2 == 0 else "assistant", "content": f"help turn {index}"}
+            for index in range(10)
+        ]
+
+        with patch.dict("sys.modules", {"ollama": fake_ollama}):
+            answer = ask_ollama_app_help("How do I import a file?", history)
+
+        sent_messages = captured["messages"]
+        self.assertEqual(answer, "Choose your bank and map the columns.")
+        self.assertEqual(len(sent_messages), 10)
+        self.assertEqual(sent_messages[0]["role"], "system")
+        self.assertEqual(sent_messages[1]["content"], "help turn 2")
+        self.assertEqual(sent_messages[-1]["content"], "How do I import a file?")
 
     def test_known_rule_matches_do_not_need_ai_review(self):
         self.assertFalse(merchant_needs_review("WALMART SUPERCENTER #123", "Walmart Supercenter", {}))

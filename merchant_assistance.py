@@ -174,6 +174,76 @@ def load_merchant_cache(cache_path: str | Path | None = None) -> dict[str, str]:
     return {str(key): str(value) for key, value in cache.items()}
 
 
+APP_HELP_GUIDE = """You help people use a local Streamlit bank-statement importer.
+Answer only questions about this app and its workflow. Be concise, friendly, and give
+clear numbered steps when useful. If the guide does not answer a question, say so
+instead of inventing behavior.
+
+Workflow: upload one or more bank CSV files; select the statement, bank, and account;
+map date, description, and amount (or debit and credit) columns; choose amount sign,
+delimiter, and number format; optionally map transaction status; then standardize.
+The bank-format expander saves reusable local defaults for built-in or custom banks.
+
+Review: edit the transaction preview, search is case-insensitive and typo-tolerant,
+and hidden search results are still included in the export. Check dates, signs, amounts,
+merchants, and categories. Manually delete any transfer not caught by the exclusion
+rules. Excluded transfers, payments, and declined transactions can be reviewed, and
+valid excluded transactions can be restored. Fix validation issues before downloading.
+
+Categories: known merchant rules and the local merchant cache are applied first.
+Unresolved merchants can be sent to local Ollama only when the user requests a
+suggestion. The merchant and category remain editable; only approval updates the
+preview and cache. The cache editor supports search, add, edit, delete, and save.
+
+Privacy: this help chat receives only the user's question and recent help-chat turns.
+It cannot see uploaded files, transactions, or the merchant cache. Do not ask users to
+paste account numbers, transaction descriptions, or other financial details. The chat
+and its history are kept only in the current Streamlit session. Ollama is optional;
+install it with `uv sync --extra ai`, run `ollama list`, and pull `gemma3:4b` only if
+that model is not already installed."""
+
+
+def ask_ollama_app_help(
+    question: str,
+    history: Sequence[Mapping[str, str]] = (),
+    *,
+    model: str = "gemma3:4b",
+) -> str:
+    """Answer an app-usage question without including transaction data."""
+    clean_question = question.strip()
+    if not clean_question:
+        raise ValueError("Enter a question about using the app.")
+
+    try:
+        import ollama
+    except ImportError as error:
+        raise RuntimeError(
+            "Ollama support is optional. Install it with `uv sync --extra ai`, "
+            "then retry your question."
+        ) from error
+
+    messages = [{"role": "system", "content": APP_HELP_GUIDE}]
+    for message in history[-8:]:
+        role = message.get("role")
+        content = message.get("content")
+        if role in {"user", "assistant"} and isinstance(content, str):
+            messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": clean_question})
+
+    response = ollama.chat(model=model, messages=messages)
+    response_message = (
+        response.get("message", {}) if isinstance(response, dict) else response.message
+    )
+    content = (
+        response_message.get("content", "")
+        if isinstance(response_message, dict)
+        else response_message.content
+    )
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("Ollama returned an empty help response. Try asking again.")
+    return content.strip()
+
+
 def save_merchant_cache(
     cache: Mapping[str, str],
     cache_path: str | Path | None = None,
