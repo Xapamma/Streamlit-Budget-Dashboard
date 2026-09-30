@@ -286,6 +286,7 @@ merchants_list = list(set(sub_category_map.keys()))
 
 # --- 3. CATEGORY HIERARCHY ---
 category_hierarchy = {
+    "Transfer": ["N/A"],
     "Food & Dining": ["Groceries", "Restaurants/Dining", "Fast Food", "Snacks"],
     "Transportation": ["Vehicle Payments", "Auto Insurance", "Fuel", "Licensing", "Parking", "Repairs", "Maintenance"],
     "Health & Wellness": ["Doctor/Dentist", "Medicine/Drugs", "Personal Care", "Pharmacy", "Health Insurance"],

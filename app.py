@@ -30,6 +30,7 @@ from final_export import (
     normalize_account_type,
     normalize_bank_name,
     normalize_export_filename,
+    make_transfer_review_rows,
     restored_rows_to_standardized,
     split_filtered_transactions,
     validate_final_export_rows,
@@ -203,7 +204,6 @@ def make_dropped_review_rows(
     return review[DROPPED_REVIEW_COLUMNS]
 
 
-st.set_page_config(page_title="Statement Import", page_icon="📄", layout="wide")
 st.title("Bank Statement Import")
 st.caption("Turn bank CSV exports into one consistent transaction table.")
 try:
@@ -707,9 +707,13 @@ if uploaded_files:
                 if not declined.empty:
                     declined["source_file"] = selected_file.name
                 exportable, filtered = split_filtered_transactions(standardized)
-                new_export = format_final_export(exportable)
+                new_export = format_final_export(exportable).reset_index(drop=True)
                 new_export["_source_file"] = selected_file.name
-                new_export["_source_row"] = pd.NA
+                new_export["_source_row"] = (
+                    exportable.sort_values("date", kind="stable")["source_row"].reset_index(drop=True)
+                    if "source_row" in exportable
+                    else pd.Series([pd.NA] * len(new_export), dtype="object")
+                )
                 review_parts = []
                 if not filtered.empty:
                     filter_reasons = filtered["removal_reason"].tolist()
@@ -782,8 +786,8 @@ if (
     st.info(
         "Before downloading, check dates, signs and amounts, and confirm merchants and categories. "
         "Merchant names and categories can be changed in the table or with the optional AI tool below. "
-        "Review transfers carefully: any transfer that was not caught by the rules should be deleted "
-        "from the table before export."
+        "Review transfers carefully: if a transfer was not caught by the rules, set its main category "
+        "to Transfer. The app fills N/A and moves it to the excluded transaction review list."
     )
     st.caption("Edit descriptions, merchants, dates and amounts directly in the table. Type, account, bank and category are selection-only.")
     editable = complete_missing_categories(st.session_state.editable_transactions)
@@ -860,6 +864,10 @@ if (
     edited_transactions = edited_editor_data.drop(
         columns=["row_number", *EDITABLE_SOURCE_COLUMNS]
     ).copy()
+    transfer_mask = (
+        edited_transactions["main_category"].astype("string").str.strip().eq("Transfer").fillna(False)
+    )
+    edited_transactions.loc[transfer_mask, "sub_category"] = CATEGORY_PAIR_TO_LABEL[("Transfer", "N/A")]
     category_pairs = edited_transactions["sub_category"].map(CATEGORY_LABEL_TO_PAIR)
     pair_mismatch = category_pairs.map(
         lambda pair: isinstance(pair, tuple)
@@ -871,6 +879,26 @@ if (
     )
     edited_transactions = edited_transactions[FINAL_EXPORT_COLUMNS]
     edited_transactions = edited_transactions.reset_index(drop=True)
+    if transfer_mask.any():
+        transfer_rows = make_transfer_review_rows(
+            edited_transactions.loc[transfer_mask].reset_index(drop=True),
+            source_files=edited_source_metadata.loc[transfer_mask, "_source_file"],
+            source_rows=edited_source_metadata.loc[transfer_mask, "_source_row"],
+        )
+        st.session_state.dropped_transactions = pd.concat(
+            [st.session_state.dropped_transactions, transfer_rows], ignore_index=True
+        )
+        st.session_state.pop(
+            f"dropped_editor_{st.session_state.dropped_editor_revision}", None
+        )
+        st.session_state.dropped_editor_revision += 1
+        st.session_state.pop(f"export_editor_{st.session_state.export_editor_revision}", None)
+        st.session_state.export_editor_revision += 1
+        edited_transactions = edited_transactions.loc[~transfer_mask].reset_index(drop=True)
+        edited_source_metadata = edited_source_metadata.loc[~transfer_mask].reset_index(drop=True)
+        editor_row_numbers = editor_row_numbers.loc[~transfer_mask].reset_index(drop=True)
+        pair_mismatch = pair_mismatch.loc[~transfer_mask].reset_index(drop=True)
+        st.info(f"Moved {int(transfer_mask.sum())} manually marked transfer(s) to the excluded transaction review list.")
     st.session_state.editable_transactions = pd.concat(
         [edited_transactions, edited_source_metadata], axis=1
     )[EDITABLE_COLUMNS]
@@ -1003,7 +1031,11 @@ if (
                 approve_col, dismiss_col = st.columns(2)
                 with approve_col:
                     approve_clicked = st.button(
-                        "Approve and add to cache", type="primary", key=f"approve_{suggestion_fingerprint}"
+                        "Mark as transfer and exclude"
+                        if selected_main == "Transfer"
+                        else "Approve and add to cache",
+                        type="primary",
+                        key=f"approve_{suggestion_fingerprint}",
                     )
                 with dismiss_col:
                     dismiss_clicked = st.button("Dismiss", key=f"dismiss_{suggestion_fingerprint}")
@@ -1015,7 +1047,8 @@ if (
                             st.stop()
                         st.session_state.ai_review_expanded = True
                         approved_merchant = edited_suggestion
-                        approve_merchant_match(suggestion_description, approved_merchant)
+                        if selected_main != "Transfer":
+                            approve_merchant_match(suggestion_description, approved_merchant)
                         updated = st.session_state.editable_transactions.copy()
                         updated.at[suggestion_row, "merchant"] = approved_merchant
                         updated.at[suggestion_row, "main_category"] = selected_main
@@ -1029,7 +1062,11 @@ if (
                         )
                         st.session_state.pop(f"export_editor_{st.session_state.export_editor_revision}", None)
                         st.session_state.export_editor_revision += 1
-                        st.success("Approved merchant saved to merchant_cache.json.")
+                        st.success(
+                            "Marked as Transfer and moved to the excluded review list."
+                            if selected_main == "Transfer"
+                            else "Approved merchant saved to merchant_cache.json."
+                        )
                         st.rerun()
                     except (OSError, ValueError) as error:
                         st.error(f"Could not save the approved merchant: {error}")

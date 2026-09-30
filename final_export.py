@@ -244,6 +244,9 @@ def complete_missing_categories(transactions: pd.DataFrame) -> pd.DataFrame:
     for index, row in result.iterrows():
         missing_main = pd.isna(row["main_category"]) or not str(row["main_category"]).strip()
         missing_sub = pd.isna(row["sub_category"]) or not str(row["sub_category"]).strip()
+        if str(row["main_category"]).strip() == "Transfer":
+            result.at[index, "sub_category"] = "N/A"
+            continue
         if not (missing_main or missing_sub):
             continue
         if pd.isna(row["merchant"]) or not str(row["merchant"]).strip():
@@ -261,6 +264,27 @@ def complete_missing_categories(transactions: pd.DataFrame) -> pd.DataFrame:
         if missing_sub:
             result.at[index, "sub_category"] = categorized["sub_category"]
     return result
+
+
+def make_transfer_review_rows(
+    transactions: pd.DataFrame,
+    *,
+    source_files: pd.Series,
+    source_rows: pd.Series,
+) -> pd.DataFrame:
+    """Convert user-marked transfers into rows in the excluded-review table."""
+    review = transactions[FINAL_EXPORT_COLUMNS].copy().reset_index(drop=True)
+    review["main_category"] = "Transfer"
+    review["sub_category"] = "N/A"
+    review["removal_reason"] = "Manually categorized as Transfer."
+    review["status"] = pd.NA
+    review["source_file"] = source_files.reset_index(drop=True)
+    review["source_row"] = source_rows.reset_index(drop=True)
+    review["restore"] = False
+    return review[
+        FINAL_EXPORT_COLUMNS
+        + ["removal_reason", "status", "source_file", "source_row", "restore"]
+    ]
 
 
 def get_exclusion_reason(transaction: pd.Series) -> str | None:

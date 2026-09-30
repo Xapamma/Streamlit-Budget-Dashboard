@@ -25,6 +25,7 @@ from final_export import (
     format_final_export,
     get_final_export_row_issues,
     get_exclusion_reason,
+    make_transfer_review_rows,
     merchant_needs_review,
     normalize_account_type,
     normalize_export_filename,
@@ -42,6 +43,12 @@ from merchant_assistance import (
 )
 from bank_profiles import load_bank_profiles, save_bank_profile
 from fuzzy_search import fuzzy_match_indices
+from dashboard_data import (
+    prepare_analytics_transactions,
+    spending_for_budget_category,
+    summarize_transactions,
+    trend_totals,
+)
 
 
 class LoadTransactionsTests(unittest.TestCase):
@@ -376,6 +383,30 @@ class LoadTransactionsTests(unittest.TestCase):
         self.assertEqual(sent_messages[1]["content"], "help turn 2")
         self.assertEqual(sent_messages[-1]["content"], "How do I import a file?")
 
+    def test_analytics_data_handles_dates_signed_amounts_and_budget_categories(self):
+        export_rows = pd.DataFrame(
+            {
+                "date": ["01/15/2026", "02/02/2026", "bad date"],
+                "merchant": ["Market", "Paycheck", "Invalid"],
+                "amount": [-50.0, 100.0, -10.0],
+                "main_category": ["Food & Dining", "Income", "Food & Dining"],
+                "sub_category": ["Groceries", "Paychecks", "Groceries"],
+            }
+        )
+
+        transactions = prepare_analytics_transactions(export_rows)
+        totals = summarize_transactions(transactions)
+        monthly = trend_totals(transactions, "M")
+
+        self.assertEqual(len(transactions), 2)
+        self.assertEqual(totals["income"], 100.0)
+        self.assertEqual(totals["spending"], 50.0)
+        self.assertEqual(totals["net_savings"], 50.0)
+        self.assertEqual(monthly.loc[pd.Timestamp("2026-01-01"), "spending"], 50.0)
+        self.assertEqual(
+            spending_for_budget_category(transactions, "Food & Dining :: Groceries"), 50.0
+        )
+
     def test_known_rule_matches_do_not_need_ai_review(self):
         self.assertFalse(merchant_needs_review("WALMART SUPERCENTER #123", "Walmart Supercenter", {}))
         self.assertTrue(merchant_needs_review("ACME MARKET 1234", "Acme Market 1234", {}))
@@ -690,6 +721,40 @@ class LoadTransactionsTests(unittest.TestCase):
         self.assertNotIn("Food & Dining :: Fuel", CATEGORY_PAIR_OPTIONS)
         self.assertNotIn("Other Income", FINAL_MAIN_CATEGORY_OPTIONS)
         self.assertIn("Income :: Other Income", CATEGORY_PAIR_OPTIONS)
+        self.assertIn("Transfer", FINAL_MAIN_CATEGORY_OPTIONS)
+        self.assertEqual(CATEGORY_LABEL_TO_PAIR["Transfer :: N/A"], ("Transfer", "N/A"))
+
+    def test_transfer_with_na_subcategory_is_a_valid_export_category(self):
+        transaction = pd.DataFrame(
+            [["06/01/2026", "Transfer", "Internal Transfer", "debit", -20.0, "Transfer", "N/A", "sofi", "checking"]],
+            columns=FINAL_EXPORT_COLUMNS,
+        )
+
+        _, error = validate_final_export_rows(transaction)
+
+        self.assertIsNone(error)
+
+    def test_transfer_category_sets_na_and_builds_excluded_review_row(self):
+        transactions = pd.DataFrame(
+            [["06/01/2026", "Moved money", "Bank Transfer", "debit", -50.0, "Transfer", "Fuel", "sofi", "checking"]],
+            columns=FINAL_EXPORT_COLUMNS,
+        )
+
+        completed = complete_missing_categories(
+            transactions.assign(sub_category=None)
+        )
+        review = make_transfer_review_rows(
+            completed,
+            source_files=pd.Series(["statement.csv"]),
+            source_rows=pd.Series([12]),
+        )
+
+        self.assertEqual(completed.loc[0, "sub_category"], "N/A")
+        self.assertEqual(review.loc[0, "main_category"], "Transfer")
+        self.assertEqual(review.loc[0, "sub_category"], "N/A")
+        self.assertEqual(review.loc[0, "removal_reason"], "Manually categorized as Transfer.")
+        self.assertEqual(review.loc[0, "source_file"], "statement.csv")
+        self.assertEqual(review.loc[0, "source_row"], 12)
 
     def test_unclassified_positive_income_uses_income_main_category(self):
         categorized = add_categories(

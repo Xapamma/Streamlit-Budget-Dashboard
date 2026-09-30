@@ -15,6 +15,9 @@ This project imports personal bank CSVs in a local Streamlit app, normalizes the
 - Ask app-usage questions in the sidebar's local Ollama help chat; it only receives the question and a short help conversation, not imported transaction data.
 - Save a reusable CSV format for each bank, including custom banks, so future imports reuse its delimiter, amount rules, account type, and column mapping.
 - Search transactions and the merchant cache with case-insensitive fuzzy matching.
+- Navigate between Home, statement processing, Overview, Analytics, and Budget pages.
+- Compare income, spending, and net savings by month, year to date, full year, or a custom date range.
+- Set session-only monthly spending limits by main category or subcategory and review progress.
 - Export the established nine-column categorized CSV format.
 
 ## Privacy
@@ -22,7 +25,10 @@ This project imports personal bank CSVs in a local Streamlit app, normalizes the
 Bank data is sensitive. `.data/`, the generated categorized CSV, `merchant_cache.json`, and `bank_profiles.json` are ignored and excluded from version control for new commits. The app processes CSV data locally. Ollama runs locally as well; it is not called unless the user requests a suggestion. Files previously pushed to a remote remain in Git history unless that history is separately rewritten.
 
 ## Project Structure
-- `app.py`: Streamlit CSV import, review, and export interface.
+- `dashboard.py`: multipage Streamlit entrypoint and navigation.
+- `pages/`: Home instructions, transaction Overview, date-range Analytics, and session-scoped Budget pages.
+- `app.py`: CSV import, review, and export page.
+- `dashboard_data.py`: safe normalization and calculations for analytics and budgets.
 - `transaction_import.py`: canonical transaction normalization and validation.
 - `final_export.py`: merchant resolution, exclusions, categories, validation, and export formatting.
 - `cleaning_logic.py`: merchant rules and category hierarchy.
@@ -40,7 +46,7 @@ Requires Python 3.13 or later. Install the base app dependencies and launch:
 
 ```bash
 uv sync
-uv run streamlit run app.py
+uv run streamlit run dashboard.py
 ```
 
 Ollama is optional. To enable local suggestions and help chat on Windows:
@@ -60,19 +66,23 @@ If `ollama` is not recognized, close and reopen the terminal. The app defaults t
 
 ## Usage
 
-### Guided CSV Import App
+### Multipage Streamlit App
 
 From the project folder, start the app with:
 
 ```bash
-uv run streamlit run app.py
+uv run streamlit run dashboard.py
 ```
+
+Start on Home for the workflow guide. Use Process statements to upload, map, review, and export bank CSVs; Overview for a session-wide snapshot; Analytics for monthly, year-to-date, yearly, or custom trends; and Budget to set monthly category limits.
+
+Analytics groups income, positive spending outflow, and net savings. A selected month defaults to daily detail; longer ranges default to monthly detail, with daily, weekly, or monthly intervals available. Year-to-date ends on the latest imported date in that year. Budget targets can be set for a main category or an individual subcategory and compared with a selected month.
 
 Upload one or more bank statement CSVs, choose each file, select its bank and account, and map the required columns. For a single signed amount column, choose whether positive values mean money in or money out. Use “Save this bank's CSV format as the default” after mapping to remember settings for a built-in or new bank; saved local profiles are selected from the bank menu on later imports. Map a Status column under Optional columns to exclude declined rows. Excluded transfers/payments have a review panel with a reason and a restore option. Positive descriptions containing refund/return/reimbursement wording are categorized as Income / Refunds.
 
 Removing an uploaded file removes all imported, edited, and excluded-review rows from that filename. Re-submitting the same filename with changed columns, sign convention, delimiter, or number format replaces its previous rows. Submitting an unchanged file with unchanged settings is blocked to avoid duplicates. Filenames must be unique among the currently uploaded statements.
 
-The download uses the same nine columns as the example file: `date`, `description`, `merchant`, `type`, `amount`, `main_category`, `sub_category`, `bank`, and `account`. Export dates use `MM/DD/YYYY`. Before downloading, review dates, signs, amounts, merchants, and categories. Transfers not caught by the rules should be manually deleted from the preview. Search the editable transaction preview and merchant cache by text; searches ignore case and tolerate typos, and filtering does not remove hidden transactions or cache entries. Known descriptions use the existing merchant rules and cache; unrecognized descriptions are exported for later review. For an unresolved transaction, the optional Ollama tool suggests a merchant and a main/subcategory from the app's allowed choices. Known merchant rules take precedence; for a new merchant, the AI category pair is preselected. Both remain editable before approval updates the preview and local cache. The unresolved count updates as matches are approved. The Personal merchant cache panel lets you add, edit, and delete cached mappings, then save them locally.
+The download uses the same nine columns as the example file: `date`, `description`, `merchant`, `type`, `amount`, `main_category`, `sub_category`, `bank`, and `account`. Export dates use `MM/DD/YYYY`. Before downloading, review dates, signs, amounts, merchants, and categories. For a transfer not caught by the rules, set its main category to `Transfer`; the subcategory becomes `N/A`, and the row moves to the excluded review list instead of the export. Search the editable transaction preview and merchant cache by text; searches ignore case and tolerate typos, and filtering does not remove hidden transactions or cache entries. Known descriptions use the existing merchant rules and cache; unrecognized descriptions are exported for later review. For an unresolved transaction, the optional Ollama tool suggests a merchant and a main/subcategory from the app's allowed choices. Known merchant rules take precedence; for a new merchant, the AI category pair is preselected. Both remain editable before approval updates the preview and local cache. The unresolved count updates as matches are approved. The Personal merchant cache panel lets you add, edit, and delete cached mappings, then save them locally.
 
 To use Ollama, check available local models with `ollama list` in a terminal. The current default is `gemma3:4b`, and `qwen3:8b` is a recommended alternative. Both the help chat and merchant-suggestion model fields accept any installed model tag. Pull a model only if you choose it and it is not already listed. Leave Ollama running, then request a suggestion in the app. The optional setup instructions and Ollama download link are also available in the app. Suggestions are requested only when you press the button; approved matches are saved locally.
 
@@ -80,6 +90,6 @@ The download columns are `date`, `description`, `merchant`, `type`, `amount`, `m
 
 ## Current Scope
 
-This is an importer and categorized CSV exporter, not yet a persistent Mint-like budget dashboard. Imported data is held in the Streamlit session; restarting the app clears that session. A local database, spending trends, budgets, and account balances are future work.
+Imported transactions and budgets are held in the Streamlit session; ending the session clears them. Export categorized transactions to keep a copy. Budget targets are not yet stored in a persistent database or separated by user account, so persistent multi-user hosting will require user-specific storage and authentication.
 
 ---

@@ -186,9 +186,10 @@ The bank-format expander saves reusable local defaults for built-in or custom ba
 
 Review: edit the transaction preview, search is case-insensitive and typo-tolerant,
 and hidden search results are still included in the export. Check dates, signs, amounts,
-merchants, and categories. Manually delete any transfer not caught by the exclusion
-rules. Excluded transfers, payments, and declined transactions can be reviewed, and
-valid excluded transactions can be restored. Fix validation issues before downloading.
+merchants, and categories. For a transfer not caught by the rules, set its main category
+to Transfer; the app fills N/A and moves it to the excluded review list. Excluded transfers,
+payments, and declined transactions can be reviewed, and valid excluded transactions can
+be restored. Fix validation issues before downloading.
 
 Categories: known merchant rules and the local merchant cache are applied first.
 Unresolved merchants can be sent to local Ollama only when the user requests a
