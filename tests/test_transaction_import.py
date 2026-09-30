@@ -1,6 +1,9 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -34,6 +37,7 @@ from merchant_assistance import (
     load_merchant_cache,
     merge_merchant_cache_edits,
     save_merchant_cache,
+    suggest_merchant_and_category_with_ollama,
 )
 from bank_profiles import load_bank_profiles, save_bank_profile
 from fuzzy_search import fuzzy_match_indices
@@ -236,6 +240,118 @@ class LoadTransactionsTests(unittest.TestCase):
 
         self.assertEqual(revised, {"electric bill": "Power Utility", "coffee shop": "New Coffee Name"})
         self.assertEqual(deleted, {"electric bill": "Power Utility"})
+
+    def test_ollama_category_suggestion_uses_only_allowed_category_pairs(self):
+        response = {
+            "message": {
+                "content": json.dumps(
+                    {
+                        "merchant": "Krazy Plant Shop",
+                        "main_category": "Shopping & Supplies",
+                        "sub_category": "General Retail",
+                    }
+                )
+            }
+        }
+        fake_ollama = SimpleNamespace(chat=lambda **_: response)
+        allowed = {"Shopping & Supplies": ["General Retail"]}
+
+        with patch.dict("sys.modules", {"ollama": fake_ollama}):
+            suggestion = suggest_merchant_and_category_with_ollama(
+                "UNRECOGNIZED XYZ", -19.0, allowed
+            )
+
+        self.assertEqual(
+            suggestion,
+            {
+                "merchant": "Krazy Plant Shop",
+                "main_category": "Shopping & Supplies",
+                "sub_category": "General Retail",
+            },
+        )
+
+    def test_ollama_category_suggestion_rejects_unknown_pairs(self):
+        response = {
+            "message": {
+                "content": json.dumps(
+                    {
+                        "merchant": "Krazy Plant Shop",
+                        "main_category": "Shopping & Supplies",
+                        "sub_category": "Unlisted Category",
+                    }
+                )
+            }
+        }
+        calls = []
+
+        def mock_chat(**_):
+            calls.append(True)
+            return response
+
+        fake_ollama = SimpleNamespace(chat=mock_chat)
+
+        with patch.dict("sys.modules", {"ollama": fake_ollama}):
+            suggestion = suggest_merchant_and_category_with_ollama(
+                "UNRECOGNIZED XYZ", -19.0, {"Shopping & Supplies": ["General Retail"]}
+            )
+
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(suggestion["merchant"], "Krazy Plant Shop")
+        self.assertEqual(suggestion["main_category"], "General Spending")
+        self.assertEqual(suggestion["sub_category"], "Other")
+        self.assertIn("invalid category after 5 attempts", suggestion["category_warning"])
+
+    def test_ollama_category_suggestion_recovers_on_fifth_attempt(self):
+        valid_response = {
+            "message": {
+                "content": json.dumps(
+                    {
+                        "merchant": "Krazy Plant Shop",
+                        "main_category": "Shopping & Supplies",
+                        "sub_category": "General Retail",
+                    }
+                )
+            }
+        }
+        responses = iter(
+            [
+                {"message": {"content": "not json"}},
+                {"message": {"content": "not json"}},
+                {"message": {"content": "not json"}},
+                {"message": {"content": "not json"}},
+                valid_response,
+            ]
+        )
+        calls = []
+
+        def mock_chat(**_):
+            calls.append(True)
+            return next(responses)
+
+        with patch.dict("sys.modules", {"ollama": SimpleNamespace(chat=mock_chat)}):
+            suggestion = suggest_merchant_and_category_with_ollama(
+                "UNRECOGNIZED XYZ", -19.0, {"Shopping & Supplies": ["General Retail"]}
+            )
+
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(suggestion["sub_category"], "General Retail")
+        self.assertNotIn("category_warning", suggestion)
+
+    def test_ollama_category_suggestion_explains_missing_merchant(self):
+        response = {"message": {"content": json.dumps({"merchant": ""})}}
+        calls = []
+
+        def mock_chat(**_):
+            calls.append(True)
+            return response
+
+        with patch.dict("sys.modules", {"ollama": SimpleNamespace(chat=mock_chat)}):
+            with self.assertRaisesRegex(ValueError, "after 5 attempts"):
+                suggest_merchant_and_category_with_ollama(
+                    "UNRECOGNIZED XYZ", -19.0, {"Shopping & Supplies": ["General Retail"]}
+                )
+
+        self.assertEqual(len(calls), 5)
 
     def test_known_rule_matches_do_not_need_ai_review(self):
         self.assertFalse(merchant_needs_review("WALMART SUPERCENTER #123", "Walmart Supercenter", {}))
@@ -469,6 +585,16 @@ class LoadTransactionsTests(unittest.TestCase):
 
         self.assertEqual(result["merchant"].tolist(), ["Costco Gas", "Costco Wholesale"])
         self.assertEqual(result["sub_category"].tolist(), ["Fuel", "Groceries"])
+
+    def test_ai_merchant_alias_uses_canonical_merchant_category(self):
+        transactions = pd.DataFrame(
+            [{"merchant": "Costco", "amount": -20.0, "description": "Unmatched transaction"}]
+        )
+
+        categorized = add_categories(transactions)
+
+        self.assertEqual(categorized.loc[0, "main_category"], "Food & Dining")
+        self.assertEqual(categorized.loc[0, "sub_category"], "Groceries")
 
     def test_export_filename_is_a_csv_basename(self):
         self.assertEqual(normalize_export_filename("monthly budget"), "monthly budget.csv")

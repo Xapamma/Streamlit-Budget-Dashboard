@@ -4,17 +4,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from cleaning_logic import clean_description_for_matching
 
+MAX_OLLAMA_SUGGESTION_ATTEMPTS = 5
 
-def suggest_merchant_with_ollama(
-    description: str,
-    *,
-    model: str = "gemma3:4b",
-) -> str:
-    """Ask the locally running Ollama model for a merchant name suggestion."""
+
+def _request_ollama_json(prompt: str, model: str) -> dict:
     try:
         import ollama
     except ImportError as error:
@@ -29,13 +26,7 @@ def suggest_merchant_with_ollama(
         messages=[
             {
                 "role": "user",
-                "content": (
-                    "Identify the merchant in this bank transaction description. "
-                    "Return only a JSON object with one string field named merchant. "
-                    "Do not infer a category or invent a merchant. If uncertain, use "
-                    "the cleaned description.\n\nDescription: "
-                    f"{description}"
-                ),
+                "content": prompt,
             }
         ],
     )
@@ -44,11 +35,111 @@ def suggest_merchant_with_ollama(
     try:
         payload = json.loads(content)
     except (TypeError, json.JSONDecodeError) as error:
-        raise ValueError("Ollama returned an invalid merchant suggestion.") from error
+        raise ValueError("Ollama returned invalid JSON.") from error
+    if not isinstance(payload, dict):
+        raise ValueError("Ollama must return a JSON object.")
+    return payload
+
+
+def suggest_merchant_with_ollama(
+    description: str,
+    *,
+    model: str = "gemma3:4b",
+) -> str:
+    """Ask the locally running Ollama model for a merchant name suggestion."""
+    payload = _request_ollama_json(
+        "Identify the merchant in this bank transaction description. "
+        "Return only a JSON object with one string field named merchant. "
+        "Do not infer a category or invent a merchant. If uncertain, use "
+        f"the cleaned description.\n\nDescription: {description}",
+        model,
+    )
     merchant = payload.get("merchant") if isinstance(payload, dict) else None
     if not isinstance(merchant, str) or not merchant.strip():
         raise ValueError("Ollama did not return a merchant name.")
     return merchant.strip()
+
+
+def suggest_merchant_and_category_with_ollama(
+    description: str,
+    amount: float,
+    category_subcategories: Mapping[str, Sequence[str]],
+    *,
+    model: str = "gemma3:4b",
+) -> dict[str, str]:
+    """Suggest a merchant and valid category, retrying malformed output up to five times."""
+    valid_categories = {
+        main_category: list(subcategories)
+        for main_category, subcategories in category_subcategories.items()
+    }
+    base_prompt = (
+        "Identify the most likely merchant and categorize this bank transaction. "
+        "Return only a JSON object with string fields merchant, main_category, and sub_category. "
+        "Choose the category pair only from the allowed choices below. Use the description, "
+        "merchant, and signed amount. Negative amounts are spending; positive amounts are income. "
+        "If uncertain, choose General Spending / Other for spending or Income / Other Income for income.\n\n"
+        f"Description: {description}\nAmount: {amount}\n"
+        f"Allowed category pairs: {json.dumps(valid_categories, ensure_ascii=True)}"
+    )
+    fallback_main, fallback_sub = (
+        ("General Spending", "Other") if amount <= 0 else ("Income", "Other Income")
+    )
+    last_merchant = ""
+    last_error = "the response was incomplete"
+
+    for attempt in range(MAX_OLLAMA_SUGGESTION_ATTEMPTS):
+        prompt = base_prompt
+        if attempt:
+            prompt = (
+                f"Your previous response was invalid because {last_error}. "
+                "Try again. Return the required JSON fields and copy a category pair exactly "
+                "from the allowed choices.\n\n"
+                + base_prompt
+            )
+        try:
+            payload = _request_ollama_json(prompt, model)
+        except ValueError as error:
+            last_error = str(error)
+            continue
+
+        merchant = payload.get("merchant")
+        if isinstance(merchant, str) and merchant.strip():
+            last_merchant = merchant.strip()
+        main_category = payload.get("main_category")
+        sub_category = payload.get("sub_category")
+        category_is_valid = (
+            isinstance(main_category, str)
+            and main_category in valid_categories
+            and isinstance(sub_category, str)
+            and sub_category in valid_categories[main_category]
+        )
+        if not last_merchant:
+            last_error = "the merchant field was missing or blank"
+        elif category_is_valid:
+            return {
+                "merchant": last_merchant,
+                "main_category": main_category,
+                "sub_category": sub_category,
+            }
+        else:
+            last_error = "the category pair was missing or outside the allowed choices"
+
+    if not last_merchant:
+        raise ValueError(
+            f"Ollama could not identify a merchant after {MAX_OLLAMA_SUGGESTION_ATTEMPTS} attempts. "
+            "Check that Ollama is running, then press Suggest merchant with Ollama to try again."
+        )
+
+    return {
+        "merchant": last_merchant,
+        "main_category": fallback_main,
+        "sub_category": fallback_sub,
+        "category_warning": (
+            f"Ollama returned an invalid category after {MAX_OLLAMA_SUGGESTION_ATTEMPTS} attempts. "
+            "A sign-based fallback is selected; "
+            "review the category before approving."
+        ),
+    }
 
 
 def approve_merchant_match(

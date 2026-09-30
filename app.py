@@ -36,14 +36,23 @@ from final_export import (
 )
 import merchant_assistance
 
-if not hasattr(merchant_assistance, "merge_merchant_cache_edits"):
+if (
+    not all(
+        hasattr(merchant_assistance, helper_name)
+        for helper_name in (
+            "merge_merchant_cache_edits",
+            "suggest_merchant_and_category_with_ollama",
+        )
+    )
+    or getattr(merchant_assistance, "MAX_OLLAMA_SUGGESTION_ATTEMPTS", 0) < 5
+):
     merchant_assistance = importlib.reload(merchant_assistance)
 
 from merchant_assistance import (
     approve_merchant_match,
     merge_merchant_cache_edits,
     save_merchant_cache,
-    suggest_merchant_with_ollama,
+    suggest_merchant_and_category_with_ollama,
 )
 from fuzzy_search import fuzzy_match_indices
 from transaction_import import (
@@ -780,7 +789,7 @@ if (
         f"Optional AI merchant help · {len(candidate_rows)} unresolved",
         expanded=st.session_state.ai_review_expanded,
     ):
-        st.caption("Ollama runs locally. It only receives a description when you request a suggestion; nothing is cached until you approve it.")
+        st.caption("Ollama runs locally. When requested, it receives only the selected description and amount plus allowed categories. Nothing is saved until you approve.")
         with st.expander("Set up Ollama (optional)", expanded=False):
             st.markdown(
                 "If Ollama is already installed, keep using it. Check `ollama list` for a downloaded model; "
@@ -825,19 +834,24 @@ if (
                     st.error("Enter a local Ollama model name.")
                 else:
                     try:
-                        with st.spinner("Asking local Ollama for a merchant suggestion..."):
-                            suggestion = suggest_merchant_with_ollama(
-                                suggestion_description, model=ai_model
+                        with st.spinner("Asking local Ollama for a merchant and category suggestion..."):
+                            suggestion = suggest_merchant_and_category_with_ollama(
+                                suggestion_description,
+                                float(suggestion_transaction["amount"]),
+                                CATEGORY_SUBCATEGORIES,
+                                model=ai_model,
                             )
                         st.session_state[suggestion_key] = {
                             "description": suggestion_description,
-                            "merchant": suggestion,
+                            **suggestion,
                         }
                     except Exception as error:
                         st.error(f"Ollama suggestion failed: {error}")
 
             pending_suggestion = st.session_state.get(suggestion_key)
             if pending_suggestion and pending_suggestion.get("description") == suggestion_description:
+                if pending_suggestion.get("category_warning"):
+                    st.warning(pending_suggestion["category_warning"])
                 edited_suggestion = st.text_input(
                     "Merchant suggestion (edit before approval)",
                     value=pending_suggestion["merchant"],
@@ -853,7 +867,14 @@ if (
                         }]
                     )
                 ).iloc[0]
-                proposed_main = suggestion_category["main_category"]
+                rule_main = suggestion_category["main_category"]
+                rule_sub = suggestion_category["sub_category"]
+                if rule_sub in {"Other", "Other Income"}:
+                    proposed_main = pending_suggestion.get("main_category", rule_main)
+                    proposed_sub = pending_suggestion.get("sub_category", rule_sub)
+                else:
+                    proposed_main = rule_main
+                    proposed_sub = rule_sub
                 if proposed_main not in FINAL_MAIN_CATEGORY_OPTIONS:
                     proposed_main = str(suggestion_transaction["main_category"])
                 current_main = str(suggestion_transaction["main_category"])
@@ -874,7 +895,6 @@ if (
                     key=f"ai_main_{category_fingerprint}",
                 )
                 subcategory_options = CATEGORY_SUBCATEGORIES[selected_main]
-                proposed_sub = suggestion_category["sub_category"]
                 if selected_main != proposed_main:
                     proposed_sub = str(suggestion_transaction["sub_category"])
                 if proposed_sub not in subcategory_options:
