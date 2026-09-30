@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "altair>=5.5.0",
     "pandas>=3.0.1",
     "rapidfuzz>=3.14.3",
     "streamlit>=1.45.0",

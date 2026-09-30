@@ -1,13 +1,15 @@
 import json
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
+from streamlit.testing.v1 import AppTest
 
-from cleaning_logic import add_categories
+from cleaning_logic import add_categories, category_hierarchy
 from transaction_import import (
     ImportFormatError,
     STANDARD_COLUMNS,
@@ -21,6 +23,7 @@ from final_export import (
     CATEGORY_PAIR_OPTIONS,
     FINAL_EXPORT_COLUMNS,
     FINAL_MAIN_CATEGORY_OPTIONS,
+    approve_transaction_category,
     complete_missing_categories,
     format_final_export,
     get_final_export_row_issues,
@@ -44,9 +47,17 @@ from merchant_assistance import (
 from bank_profiles import load_bank_profiles, save_bank_profile
 from fuzzy_search import fuzzy_match_indices
 from dashboard_data import (
+    apply_transaction_category_edits,
+    analytics_transactions_csv,
+    category_editor_data,
+    filter_transactions_by_category,
+    income_for_budget_category,
     prepare_analytics_transactions,
+    sort_rows_by_date,
+    spending_by_main_category,
     spending_for_budget_category,
     summarize_transactions,
+    transactions_for_category_review,
     trend_totals,
 )
 
@@ -387,6 +398,7 @@ class LoadTransactionsTests(unittest.TestCase):
         export_rows = pd.DataFrame(
             {
                 "date": ["01/15/2026", "02/02/2026", "bad date"],
+                "description": ["Market purchase", "Employer deposit", "Invalid row"],
                 "merchant": ["Market", "Paycheck", "Invalid"],
                 "amount": [-50.0, 100.0, -10.0],
                 "main_category": ["Food & Dining", "Income", "Food & Dining"],
@@ -406,6 +418,354 @@ class LoadTransactionsTests(unittest.TestCase):
         self.assertEqual(
             spending_for_budget_category(transactions, "Food & Dining :: Groceries"), 50.0
         )
+        self.assertEqual(income_for_budget_category(transactions, "Income :: Paychecks"), 100.0)
+
+    def test_analytics_category_totals_and_transaction_filters(self):
+        transactions = pd.DataFrame(
+            [
+                {"date": pd.Timestamp("2026-01-01"), "merchant": "Market", "amount": -25.0,
+                 "description": "Market groceries", "main_category": "Food & Dining", "sub_category": "Groceries"},
+                {"date": pd.Timestamp("2026-01-02"), "merchant": "Cafe", "amount": -10.0,
+                 "description": "Cafe purchase", "main_category": "Food & Dining", "sub_category": "Fast Food"},
+                {"date": pd.Timestamp("2026-01-03"), "merchant": "Payroll", "amount": 100.0,
+                 "description": "Payroll deposit", "main_category": "Income", "sub_category": "Paychecks"},
+                {"date": pd.Timestamp("2026-01-04"), "merchant": "Unknown", "amount": -7.0,
+                 "description": "Uncategorized purchase", "main_category": "General Spending", "sub_category": "Other"},
+            ]
+        )
+
+        totals = spending_by_main_category(transactions)
+        review_transactions = transactions_for_category_review(transactions)
+        main_rows = filter_transactions_by_category(review_transactions, "Food & Dining")
+        subcategory_rows = filter_transactions_by_category(
+            review_transactions, "Food & Dining", "Groceries"
+        )
+
+        totals_by_category = totals.set_index("main_category")["spending"]
+        self.assertEqual(totals_by_category["Food & Dining"], 35.0)
+        self.assertEqual(totals_by_category["General Spending"], 7.0)
+        self.assertEqual(totals_by_category["Housing & Bills"], 0.0)
+        self.assertEqual(
+            set(totals_by_category.index) - {"General Spending"},
+            set(category_hierarchy) - {"Income", "Transfer"},
+        )
+        self.assertIn("General Spending", review_transactions["main_category"].tolist())
+        general_spending_rows = filter_transactions_by_category(
+            review_transactions, "General Spending"
+        )
+        self.assertEqual(general_spending_rows["merchant"].tolist(), ["Unknown"])
+        self.assertEqual(main_rows["merchant"].tolist(), ["Cafe", "Market"])
+        self.assertEqual(subcategory_rows["merchant"].tolist(), ["Market"])
+
+    def test_analytics_page_offers_filtered_transaction_download(self):
+        transactions = pd.DataFrame(
+            [
+                ["03/10/2026", "Market purchase", "Market", "debit", -45.0,
+                 "Food & Dining", "Groceries", "sofi", "checking", "a.csv", 2],
+                ["03/11/2026", "Cafe purchase", "Cafe", "debit", -12.0,
+                 "Food & Dining", "Fast Food", "sofi", "checking", "a.csv", 3],
+            ],
+            columns=FINAL_EXPORT_COLUMNS + ["_source_file", "_source_row"],
+        )
+        edited_transactions = transactions.copy()
+        edited_transactions.loc[0, "main_category"] = "Education"
+        edited_transactions.loc[0, "sub_category"] = "Books"
+        csv_data = analytics_transactions_csv(
+            prepare_analytics_transactions(edited_transactions)
+        )
+        self.assertIn(b"Education,Books", csv_data)
+
+        app = AppTest.from_file("../dashboard.py")
+        app.session_state["editable_transactions"] = edited_transactions
+        app.switch_page("pages/analytics.py").run()
+
+        self.assertFalse(app.exception)
+        self.assertEqual(
+            [button.label for button in app.get("download_button")],
+            ["Download filtered transactions"],
+        )
+        search_box = next(
+            text_input
+            for text_input in app.get("text_input")
+            if text_input.label == "Search transactions"
+        )
+        search_box.set_value("Market").run()
+        self.assertFalse(app.exception)
+        self.assertTrue(
+            any("Showing 1 of 2 transaction(s)" in caption.value for caption in app.get("caption"))
+        )
+
+    def test_category_edits_from_filtered_list_update_original_session_rows(self):
+        export_rows = pd.DataFrame(
+            [
+                ["03/09/2026", "Cafe", "Cafe", "debit", -12.0,
+                 "Food & Dining", "Fast Food", "sofi", "checking", "a.csv", 2],
+                ["03/10/2026", "Market", "Market", "debit", -45.0,
+                 "Food & Dining", "Groceries", "sofi", "checking", "a.csv", 3],
+                ["03/11/2026", "Market", "Market", "debit", -18.0,
+                 "General Spending", "Other", "sofi", "checking", "a.csv", 4],
+            ],
+            columns=FINAL_EXPORT_COLUMNS + ["_source_file", "_source_row"],
+        )
+        export_rows["_category_reviewed"] = [True, False, False]
+        analytics_rows = prepare_analytics_transactions(export_rows)
+        filtered_rows = analytics_rows.iloc[[1]].copy()
+        edited_rows = category_editor_data(
+            filtered_rows,
+            ["date", "merchant", "amount", "main_category", "sub_category"],
+        )
+        edited_rows.loc[edited_rows.index[0], "main_category"] = "Education"
+        edited_rows.loc[edited_rows.index[0], "sub_category"] = "Education :: Books"
+        edited_rows.loc[edited_rows.index[0], "merchant"] = "Market Place Grocers"
+
+        with patch("dashboard_data.approve_transaction_category") as save_category_mapping:
+            with patch("dashboard_data.approve_merchant_match") as save_merchant_mapping:
+                updated_rows, changed, mismatch = apply_transaction_category_edits(
+                    export_rows,
+                    edited_rows,
+                    persist_category_mappings=True,
+                    persist_merchant_mappings=True,
+                )
+
+        self.assertTrue(changed)
+        self.assertFalse(mismatch)
+        self.assertEqual(updated_rows.loc[0, "main_category"], "Food & Dining")
+        self.assertEqual(updated_rows.loc[1, "main_category"], "Education")
+        self.assertEqual(updated_rows.loc[1, "sub_category"], "Books")
+        self.assertEqual(updated_rows.loc[1, "merchant"], "Market Place Grocers")
+        self.assertEqual(updated_rows.loc[2, "main_category"], "Education")
+        self.assertEqual(updated_rows.loc[2, "sub_category"], "Books")
+        self.assertEqual(updated_rows.loc[2, "merchant"], "Market Place Grocers")
+        self.assertTrue(updated_rows.loc[1, "_category_reviewed"])
+        save_category_mapping.assert_called_once_with("Market", "Education", "Books")
+        save_merchant_mapping.assert_called_once_with("Market", "Market Place Grocers")
+
+    def test_approved_category_is_reused_for_repeated_description_imports(self):
+        category_cache_path = self.temp_path / "category_cache.json"
+        description = "ACME MARKET 1234 PURCHASE"
+        approve_transaction_category(
+            description,
+            "Shopping & Supplies",
+            "General Retail",
+            cache_path=category_cache_path,
+        )
+        transactions = pd.DataFrame(
+            [{
+                "transaction_id": "acme-1",
+                "date": "03/10/2026",
+                "posted_date": "03/10/2026",
+                "description": description,
+                "amount": -45.0,
+                "transaction_type": "debit",
+                "bank": "sofi",
+                "account": "checking",
+            }],
+            columns=[
+                "transaction_id", "date", "posted_date", "description", "amount",
+                "transaction_type", "bank", "account",
+            ],
+        )
+
+        exported = format_final_export(
+            transactions,
+            merchant_cache_path=self.temp_path / "missing_merchant_cache.json",
+            category_cache_path=category_cache_path,
+        )
+
+        self.assertEqual(exported.loc[0, "main_category"], "Shopping & Supplies")
+        self.assertEqual(exported.loc[0, "sub_category"], "General Retail")
+
+    def test_overview_recent_transactions_render_with_shared_data(self):
+        transactions = pd.DataFrame(
+            [
+                ["03/10/2026", "Market purchase", "Market", "debit", -45.0,
+                 "Food & Dining", "Groceries", "sofi", "checking", "a.csv", 2],
+            ],
+            columns=FINAL_EXPORT_COLUMNS + ["_source_file", "_source_row"],
+        )
+        app = AppTest.from_file("../dashboard.py")
+        app.session_state["editable_transactions"] = transactions
+        app.switch_page("pages/overview.py").run()
+
+        self.assertFalse(app.exception)
+
+    def test_process_page_keeps_imported_rows_when_uploader_is_empty(self):
+        standardized = pd.DataFrame(
+            [{
+                "transaction_id": "market-1",
+                "date": "03/10/2026",
+                "posted_date": "03/10/2026",
+                "description": "Market purchase",
+                "amount": -45.0,
+                "transaction_type": "debit",
+                "bank_category": "",
+                "status": "",
+                "bank": "sofi",
+                "account": "checking",
+                "currency": "USD",
+                "source_file": "a.csv",
+                "source_row": 2,
+            }],
+            columns=STANDARD_COLUMNS,
+        )
+        editable = pd.DataFrame(
+            [["03/10/2026", "Market purchase", "Market", "debit", -45.0,
+              "Food & Dining", "Groceries", "sofi", "checking", "a.csv", 2]],
+            columns=FINAL_EXPORT_COLUMNS + ["_source_file", "_source_row"],
+        )
+        app = AppTest.from_file("../dashboard.py")
+        app.session_state["standardized_transactions"] = standardized
+        app.session_state["editable_transactions"] = editable
+        app.session_state["file_import_signatures"] = {"a.csv": "signature"}
+        app.switch_page("app.py").run()
+
+        self.assertFalse(app.exception)
+        self.assertEqual(len(app.session_state.standardized_transactions), 1)
+        self.assertEqual(len(app.session_state.editable_transactions), 1)
+        self.assertEqual(app.session_state.editable_transactions.loc[0, "_source_file"], "a.csv")
+
+    def test_general_spending_fallback_requires_review_before_download(self):
+        standardized = pd.DataFrame(
+            [{
+                "transaction_id": "unknown-1",
+                "date": "03/10/2026",
+                "posted_date": "03/10/2026",
+                "description": "Unrecognized merchant purchase",
+                "amount": -45.0,
+                "transaction_type": "debit",
+                "bank_category": "",
+                "status": "",
+                "bank": "sofi",
+                "account": "checking",
+                "currency": "USD",
+                "source_file": "a.csv",
+                "source_row": 2,
+            }],
+            columns=STANDARD_COLUMNS,
+        )
+        editable = pd.DataFrame(
+            [["03/10/2026", "Unrecognized merchant purchase", "Unrecognized Merchant Purchase",
+              "debit", -45.0, "General Spending", "Other", "sofi", "checking", "a.csv", 2, pd.NA]],
+            columns=FINAL_EXPORT_COLUMNS + ["_source_file", "_source_row", "_category_reviewed"],
+        )
+        editable["_category_reviewed"] = pd.Series([pd.NA], dtype="Float64")
+        app = AppTest.from_file("../dashboard.py")
+        app.session_state["standardized_transactions"] = standardized
+        app.session_state["editable_transactions"] = editable
+        app.session_state["file_import_signatures"] = {"a.csv": "signature"}
+        app.switch_page("app.py").run()
+
+        self.assertFalse(app.exception)
+        download_button = next(
+            button
+            for button in app.get("download_button")
+            if button.label == "Download categorized transactions"
+        )
+        self.assertTrue(download_button.proto.disabled)
+        self.assertFalse(app.session_state.editable_transactions.loc[0, "_category_reviewed"])
+
+    def test_budget_auto_adjusts_main_cap_and_can_allocate_remainder_to_savings(self):
+        transactions = pd.DataFrame(
+            [
+                ["09/15/2026", "Market", "Market", "debit", -125.0, "Food & Dining", "Groceries", "sofi", "checking", "a.csv", 2],
+                ["09/15/2026", "Payroll", "Employer", "credit", 500.0, "Income", "Paychecks", "sofi", "checking", "a.csv", 3],
+            ],
+            columns=FINAL_EXPORT_COLUMNS + ["_source_file", "_source_row"],
+        )
+        app = AppTest.from_file("../dashboard.py")
+        app.session_state["editable_transactions"] = transactions
+        app.session_state["monthly_income"] = 500.0
+        app.session_state["monthly_budgets"] = {
+            "Food & Dining": 100.0,
+            "Food & Dining :: Groceries": 70.0,
+            "Food & Dining :: Fast Food": 50.0,
+        }
+        app.session_state["budget_month"] = date(2026, 9, 1)
+        app.switch_page("pages/budget.py").run()
+
+        self.assertFalse(app.exception)
+        self.assertEqual(app.session_state.monthly_budgets["Food & Dining"], 125.0)
+        self.assertEqual(
+            next(metric.value for metric in app.metric if metric.label == "Income unallocated"),
+            "$375.00",
+        )
+
+        allocate_button = next(
+            button
+            for button in app.button
+            if button.label == "Allocate remainder to Savings & Investments"
+        )
+        allocate_button.click().run()
+
+        self.assertFalse(app.exception)
+        self.assertEqual(app.session_state.monthly_budgets["Savings & Investments"], 375.0)
+        self.assertEqual(
+            next(metric.value for metric in app.metric if metric.label == "Income unallocated"),
+            "$0.00",
+        )
+
+    def test_selected_month_transactions_seed_missing_budget_targets(self):
+        transactions = pd.DataFrame(
+            [
+                ["03/10/2026", "Market", "Market", "debit", -45.0, "Food & Dining", "Groceries", "sofi", "checking", "a.csv", 2],
+                ["03/11/2026", "Payroll", "Employer", "credit", 800.0, "Income", "Paychecks", "sofi", "checking", "a.csv", 3],
+            ],
+            columns=FINAL_EXPORT_COLUMNS + ["_source_file", "_source_row"],
+        )
+        app = AppTest.from_file("../dashboard.py")
+        app.session_state["editable_transactions"] = transactions
+        app.session_state["budget_month"] = date(2026, 3, 1)
+        app.session_state["monthly_budgets_by_month"] = {
+            "2026-03": {"Food & Dining": 60.0},
+            "2026-04": {"Food & Dining": 90.0},
+        }
+        app.session_state["monthly_income_by_month"] = {"2026-03": 800.0, "2026-04": 900.0}
+        app.switch_page("pages/budget.py").run()
+
+        self.assertFalse(app.exception)
+        self.assertTrue(
+            any(
+                expander.label.startswith("Groceries · $45.00 spent of $45.00")
+                for expander in app.expander
+            )
+        )
+        march_budgets = app.session_state.monthly_budgets
+        self.assertEqual(march_budgets["Food & Dining"], 60.0)
+        self.assertEqual(march_budgets["Food & Dining :: Groceries"], 45.0)
+        self.assertEqual(march_budgets["Income :: Paychecks"], 800.0)
+        self.assertEqual(app.session_state.monthly_income, 800.0)
+        self.assertEqual(
+            next(metric.value for metric in app.metric if metric.label == "Income remaining"),
+            "$755.00",
+        )
+        self.assertEqual(
+            app.session_state.monthly_budgets_by_month["2026-04"],
+            {"Food & Dining": 90.0},
+        )
+
+    def test_budget_main_categories_match_cleaning_logic_hierarchy(self):
+        app = AppTest.from_file("../dashboard.py")
+        app.switch_page("pages/budget.py").run()
+
+        self.assertFalse(app.exception, app.exception)
+        displayed_main_categories = {
+            expander.label.split(" · ", 1)[0]
+            for expander in app.expander
+            if expander.label.split(" · ", 1)[0] in category_hierarchy
+        }
+
+        self.assertEqual(displayed_main_categories, set(category_hierarchy))
+        self.assertNotIn("General Spending", displayed_main_categories)
+
+    def test_export_rows_sort_by_date_stably_and_put_invalid_dates_last(self):
+        rows = pd.DataFrame(
+            {"date": ["02/01/2026", "01/15/2026", "bad date", "01/15/2026"],
+             "merchant": ["Later", "First", "Invalid", "Second"]}
+        )
+
+        sorted_rows = sort_rows_by_date(rows)
+
+        self.assertEqual(sorted_rows["merchant"].tolist(), ["First", "Second", "Later", "Invalid"])
 
     def test_known_rule_matches_do_not_need_ai_review(self):
         self.assertFalse(merchant_needs_review("WALMART SUPERCENTER #123", "Walmart Supercenter", {}))
@@ -721,6 +1081,7 @@ class LoadTransactionsTests(unittest.TestCase):
         self.assertNotIn("Food & Dining :: Fuel", CATEGORY_PAIR_OPTIONS)
         self.assertNotIn("Other Income", FINAL_MAIN_CATEGORY_OPTIONS)
         self.assertIn("Income :: Other Income", CATEGORY_PAIR_OPTIONS)
+        self.assertIn("Income :: Savings / Other Withdrawals", CATEGORY_PAIR_OPTIONS)
         self.assertIn("Transfer", FINAL_MAIN_CATEGORY_OPTIONS)
         self.assertEqual(CATEGORY_LABEL_TO_PAIR["Transfer :: N/A"], ("Transfer", "N/A"))
 

@@ -77,7 +77,8 @@ def suggest_merchant_and_category_with_ollama(
         "Return only a JSON object with string fields merchant, main_category, and sub_category. "
         "Choose the category pair only from the allowed choices below. Use the description, "
         "merchant, and signed amount. Negative amounts are spending; positive amounts are income. "
-        "If uncertain, choose General Spending / Other for spending or Income / Other Income for income.\n\n"
+        "Choose the most specific category supported by the transaction details. Use General Spending / Other "
+        "only when no listed spending category is supported; every suggestion will be reviewed before saving.\n\n"
         f"Description: {description}\nAmount: {amount}\n"
         f"Allowed category pairs: {json.dumps(valid_categories, ensure_ascii=True)}"
     )
@@ -185,7 +186,9 @@ delimiter, and number format; optionally map transaction status; then standardiz
 The bank-format expander saves reusable local defaults for built-in or custom banks.
 
 Review: edit the transaction preview, search is case-insensitive and typo-tolerant,
-and hidden search results are still included in the export. Check dates, signs, amounts,
+and hidden search results are still included in the export. The preview and download are
+sorted oldest to newest by transaction date, including after a date edit; invalid dates
+stay at the bottom for correction. Check dates, signs, amounts,
 merchants, and categories. For a transfer not caught by the rules, set its main category
 to Transfer; the app fills N/A and moves it to the excluded review list. Excluded transfers,
 payments, and declined transactions can be reviewed, and valid excluded transactions can
@@ -195,6 +198,15 @@ Categories: known merchant rules and the local merchant cache are applied first.
 Unresolved merchants can be sent to local Ollama only when the user requests a
 suggestion. The merchant and category remain editable; only approval updates the
 preview and cache. The cache editor supports search, add, edit, delete, and save.
+
+Budgeting: choose a month, then enter income line by line under Income: Paychecks,
+Dividends, Refunds, CC Rewards, Other Income, and Savings / Other Withdrawals. The total
+income and unallocated amount update automatically. Categorized transactions for the
+selected month prefill missing targets, but existing limits and removed lines are preserved.
+A main-category limit rises automatically when subcategory plans or selected-month spending
+exceed it. Use the savings allocation button to assign positive remaining income to Savings
+& Investments; the page warns when the overall plan is above or below income. Budgets are
+separate for each selected month.
 
 Privacy: this help chat receives only the user's question and recent help-chat turns.
 It cannot see uploaded files, transactions, or the merchant cache. Do not ask users to

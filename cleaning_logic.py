@@ -289,15 +289,15 @@ category_hierarchy = {
     "Transfer": ["N/A"],
     "Food & Dining": ["Groceries", "Restaurants/Dining", "Fast Food", "Snacks"],
     "Transportation": ["Vehicle Payments", "Auto Insurance", "Fuel", "Licensing", "Parking", "Repairs", "Maintenance"],
-    "Health & Wellness": ["Doctor/Dentist", "Medicine/Drugs", "Personal Care", "Pharmacy", "Health Insurance"],
+    "Health & Wellness": ["Doctor/Dentist", "Medicine/Drugs", "Personal Care", "Health Insurance"],
     "Travel & Lodging": ["Airfare", "Lodging", "Travel & Commute"],
     "Shopping & Supplies": ["General Retail", "Home Improvement", "Hobbies", "Clothing"], 
     "Housing & Bills": ["Mortgage/Rent", "Phone", "Cable/Internet", "Service Fees", "Utilities", "Maintenance/Repairs"],
     "Gifts & Donations": ["Tithing", "Fast Offerings", "Hum Aid", "Gift"],
     "Education": ["Education", "Tutition", "Books"],
-    "Entertainment": ["Gaming", "Subscriptions", "Recreation"],
+    "Entertainment": ["Gaming", "Subscriptions", "Recreation", "Tickets"],
     "Savings & Investments": ["Dividends", "Investments", "Emergency Fund", "Retirement", "House Down Payment"],
-    "Income": ["Paychecks", "Refunds", "CC Rewards", "Other Income"],
+    "Income": ["Paychecks", "Refunds", "CC Rewards", "Other Income", "Savings / Other Withdrawals"],
     "Miscellaneous": ["Fees & Charges", "Other Services"], 
     "Vacations / Travel": ["Airfare", "Travel", "Lodging", "Food", "Entertainment", "Souvenirs"]    
 }

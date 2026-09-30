@@ -52,6 +52,7 @@ CATEGORY_PAIR_TO_LABEL = {
 }
 CATEGORY_LABEL_TO_PAIR = {label: pair for pair, label in CATEGORY_PAIR_TO_LABEL.items()}
 CATEGORY_PAIR_OPTIONS = sorted(CATEGORY_LABEL_TO_PAIR)
+CATEGORY_CACHE_PATH = Path(__file__).with_name("category_cache.json")
 EXCLUDED_DESCRIPTION_FRAGMENTS = (
     "transfer to sofi",
     "to checking",
@@ -334,6 +335,65 @@ def load_merchant_cache(cache_path: str | Path | None = None) -> Mapping[str, st
     return cache
 
 
+def load_category_cache(cache_path: str | Path | None = None) -> dict[str, dict[str, str]]:
+    """Load approved transaction-description category pairs."""
+    path = Path(cache_path) if cache_path is not None else CATEGORY_CACHE_PATH
+    if not path.exists():
+        return {}
+    with path.open(encoding="utf-8") as cache_file:
+        cache = json.load(cache_file)
+    if not isinstance(cache, dict):
+        raise ValueError("Category cache must contain a JSON object.")
+    approved = {}
+    for description, mapping in cache.items():
+        if not isinstance(mapping, dict):
+            continue
+        main_category = mapping.get("main_category")
+        sub_category = mapping.get("sub_category")
+        if (
+            isinstance(main_category, str)
+            and isinstance(sub_category, str)
+            and main_category in CATEGORY_SUBCATEGORIES
+            and main_category != "Transfer"
+            and sub_category in CATEGORY_SUBCATEGORIES[main_category]
+        ):
+            approved[str(description)] = {
+                "main_category": main_category,
+                "sub_category": sub_category,
+            }
+    return approved
+
+
+def approve_transaction_category(
+    description: str,
+    main_category: str,
+    sub_category: str,
+    *,
+    cache_path: str | Path | None = None,
+) -> str:
+    """Persist an explicitly approved category pair for a normalized description."""
+    normalized_description = clean_description_for_matching(description)
+    if not normalized_description:
+        raise ValueError("A non-empty transaction description is required to save a category.")
+    if (
+        main_category not in CATEGORY_SUBCATEGORIES
+        or main_category == "Transfer"
+        or sub_category not in CATEGORY_SUBCATEGORIES[main_category]
+    ):
+        raise ValueError("Choose a valid, non-transfer category pair before saving it.")
+
+    path = Path(cache_path) if cache_path is not None else CATEGORY_CACHE_PATH
+    cache = load_category_cache(path)
+    cache[normalized_description] = {
+        "main_category": main_category,
+        "sub_category": sub_category,
+    }
+    with path.open("w", encoding="utf-8") as cache_file:
+        json.dump(cache, cache_file, indent=2, ensure_ascii=True)
+        cache_file.write("\n")
+    return normalized_description
+
+
 def _fuzzy_match(description: str, choices: list[str]) -> tuple[str | None, float]:
     if not choices:
         return None, 0
@@ -401,6 +461,7 @@ def format_final_export(
     transactions: pd.DataFrame,
     *,
     merchant_cache_path: str | Path | None = None,
+    category_cache_path: str | Path | None = None,
     apply_exclusions: bool = True,
 ) -> pd.DataFrame:
     """Create the same nine-column categorized schema as the example CSV.
@@ -439,6 +500,14 @@ def format_final_export(
         return result[FINAL_EXPORT_COLUMNS].copy()
 
     result = add_categories(result)
+    category_cache = load_category_cache(category_cache_path)
+    for index, description in result["description"].items():
+        approved_pair = category_cache.get(
+            clean_description_for_matching(str(description))
+        )
+        if approved_pair:
+            result.at[index, "main_category"] = approved_pair["main_category"]
+            result.at[index, "sub_category"] = approved_pair["sub_category"]
     result["date"] = pd.to_datetime(result["date"], errors="coerce")
     result = result.sort_values("date", kind="stable")
     result["date"] = result["date"].dt.strftime("%m/%d/%Y")

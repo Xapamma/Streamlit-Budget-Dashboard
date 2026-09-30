@@ -61,6 +61,7 @@ name = "bank-statement-processor"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "altair" },
     { name = "pandas" },
     { name = "rapidfuzz" },
     { name = "streamlit" },
@@ -73,6 +74,7 @@ ai = [
 
 [package.metadata]
 requires-dist = [
+    { name = "altair", specifier = ">=5.5.0" },
     { name = "ollama", marker = "extra == 'ai'", specifier = ">=0.6.1" },
     { name = "pandas", specifier = ">=3.0.1" },
     { name = "rapidfuzz", specifier = ">=3.14.3" },

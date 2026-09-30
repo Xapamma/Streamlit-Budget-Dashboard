@@ -14,7 +14,14 @@ import pandas as pd
 import streamlit as st
 
 from bank_profiles import load_bank_profiles, save_bank_profile
+from dashboard_data import sort_rows_by_date
 from cleaning_logic import add_categories, clean_description_for_matching
+
+import final_export
+
+if not hasattr(final_export, "approve_transaction_category"):
+    importlib.reload(final_export)
+
 from final_export import (
     CATEGORY_SUBCATEGORIES,
     CATEGORY_LABEL_TO_PAIR,
@@ -22,9 +29,11 @@ from final_export import (
     CATEGORY_PAIR_TO_LABEL,
     FINAL_EXPORT_COLUMNS,
     FINAL_MAIN_CATEGORY_OPTIONS,
+    approve_transaction_category,
     complete_missing_categories,
     format_final_export,
     get_final_export_row_issues,
+    load_category_cache,
     load_merchant_cache,
     merchant_needs_review,
     normalize_account_type,
@@ -104,7 +113,7 @@ DROPPED_REVIEW_COLUMNS = FINAL_EXPORT_COLUMNS + [
     "source_row",
     "restore",
 ]
-EDITABLE_SOURCE_COLUMNS = ["_source_file", "_source_row"]
+EDITABLE_SOURCE_COLUMNS = ["_source_file", "_source_row", "_category_reviewed"]
 EDITABLE_COLUMNS = FINAL_EXPORT_COLUMNS + EDITABLE_SOURCE_COLUMNS
 HEADER_SUGGESTIONS = {
     "date": ("date", "transaction date", "posting date", "effective date", "activity date"),
@@ -223,8 +232,6 @@ if "standardized_transactions" not in st.session_state:
     st.session_state.standardized_transactions = pd.DataFrame(columns=STANDARD_COLUMNS)
 if "file_import_signatures" not in st.session_state:
     st.session_state.file_import_signatures = {}
-if "active_upload_names" not in st.session_state:
-    st.session_state.active_upload_names = set()
 if "dropped_transactions" not in st.session_state:
     st.session_state.dropped_transactions = pd.DataFrame(columns=DROPPED_REVIEW_COLUMNS)
 if "dropped_editor_revision" not in st.session_state:
@@ -248,42 +255,47 @@ if "editable_transactions" not in st.session_state:
     )
     initial_export["_source_file"] = ""
     initial_export["_source_row"] = pd.NA
+    approved_category_cache = load_category_cache()
+    initial_export["_category_reviewed"] = [
+        main_category != "General Spending"
+        or clean_description_for_matching(str(description)) in approved_category_cache
+        for main_category, description in zip(
+            initial_export["main_category"], initial_export["description"]
+        )
+    ]
     st.session_state.editable_transactions = initial_export[EDITABLE_COLUMNS]
 elif not set(EDITABLE_SOURCE_COLUMNS).issubset(st.session_state.editable_transactions.columns):
     st.session_state.editable_transactions = st.session_state.editable_transactions.copy()
-    st.session_state.editable_transactions["_source_file"] = ""
-    st.session_state.editable_transactions["_source_row"] = pd.NA
+    if "_source_file" not in st.session_state.editable_transactions.columns:
+        st.session_state.editable_transactions["_source_file"] = ""
+    if "_source_row" not in st.session_state.editable_transactions.columns:
+        st.session_state.editable_transactions["_source_row"] = pd.NA
+    if "_category_reviewed" not in st.session_state.editable_transactions.columns:
+        approved_category_cache = load_category_cache()
+        st.session_state.editable_transactions["_category_reviewed"] = (
+            st.session_state.editable_transactions.apply(
+                lambda row: row["main_category"] != "General Spending"
+                or clean_description_for_matching(str(row["description"]))
+                in approved_category_cache,
+                axis=1,
+            )
+        )
     st.session_state.editable_transactions = st.session_state.editable_transactions[EDITABLE_COLUMNS]
 
-active_upload_names = {uploaded.name for uploaded in (uploaded_files or [])}
-removed_upload_names = st.session_state.active_upload_names - active_upload_names
-if removed_upload_names:
-    st.session_state.standardized_transactions = remove_source_rows(
-        st.session_state.standardized_transactions,
-        source_column="source_file",
-        source_names=removed_upload_names,
-    )
-    st.session_state.editable_transactions = remove_source_rows(
-        st.session_state.editable_transactions,
-        source_column="_source_file",
-        source_names=removed_upload_names,
-    )
-    st.session_state.dropped_transactions = remove_source_rows(
-        st.session_state.dropped_transactions,
-        source_column="source_file",
-        source_names=removed_upload_names,
-    )
-    for removed_name in removed_upload_names:
-        st.session_state.file_import_signatures.pop(removed_name, None)
-    st.session_state.pop(f"export_editor_{st.session_state.export_editor_revision}", None)
-    st.session_state.pop(f"dropped_editor_{st.session_state.dropped_editor_revision}", None)
-    st.session_state.export_editor_revision += 1
-    st.session_state.dropped_editor_revision += 1
-st.session_state.active_upload_names = active_upload_names
-if st.session_state.get("export_editor_schema_version") != 4:
+st.session_state.editable_transactions["_category_reviewed"] = st.session_state.editable_transactions[
+    "_category_reviewed"
+].map(
+    lambda value: False
+    if pd.isna(value)
+    else value.strip().casefold() in {"true", "1", "yes"}
+    if isinstance(value, str)
+    else bool(value)
+).astype(bool)
+
+if st.session_state.get("export_editor_schema_version") != 5:
     st.session_state.pop(f"export_editor_{st.session_state.export_editor_revision}", None)
     st.session_state.export_editor_revision += 1
-    st.session_state.export_editor_schema_version = 4
+    st.session_state.export_editor_schema_version = 5
 
 with st.sidebar:
     st.header("Imported data")
@@ -296,12 +308,50 @@ with st.sidebar:
         st.session_state.editable_transactions = pd.DataFrame(columns=EDITABLE_COLUMNS)
         st.session_state.dropped_transactions = pd.DataFrame(columns=DROPPED_REVIEW_COLUMNS)
         st.session_state.file_import_signatures = {}
-        st.session_state.active_upload_names = set()
         st.session_state.pop(f"export_editor_{st.session_state.export_editor_revision}", None)
         st.session_state.pop(f"dropped_editor_{st.session_state.dropped_editor_revision}", None)
         st.session_state.export_editor_revision += 1
         st.session_state.dropped_editor_revision += 1
         st.rerun()
+
+    source_names = set()
+    for frame, column in (
+        (current_data, "source_file"),
+        (st.session_state.editable_transactions, "_source_file"),
+        (st.session_state.dropped_transactions, "source_file"),
+    ):
+        if column in frame.columns:
+            source_names.update(frame[column].dropna().astype(str).loc[lambda values: values != ""])
+    if source_names:
+        with st.expander("Remove one statement's data", expanded=False):
+            statement_to_remove = st.selectbox(
+                "Statement",
+                sorted(source_names),
+                key="statement_to_remove",
+            )
+            if st.button("Remove selected statement data"):
+                st.session_state.standardized_transactions = remove_source_rows(
+                    st.session_state.standardized_transactions,
+                    source_column="source_file",
+                    source_names={statement_to_remove},
+                )
+                st.session_state.editable_transactions = remove_source_rows(
+                    st.session_state.editable_transactions,
+                    source_column="_source_file",
+                    source_names={statement_to_remove},
+                )
+                st.session_state.dropped_transactions = remove_source_rows(
+                    st.session_state.dropped_transactions,
+                    source_column="source_file",
+                    source_names={statement_to_remove},
+                )
+                st.session_state.file_import_signatures.pop(statement_to_remove, None)
+                st.session_state.pop(f"export_editor_{st.session_state.export_editor_revision}", None)
+                st.session_state.pop(f"dropped_editor_{st.session_state.dropped_editor_revision}", None)
+                st.session_state.export_editor_revision += 1
+                st.session_state.dropped_editor_revision += 1
+                st.session_state.pop("statement_to_remove", None)
+                st.rerun()
 
     with st.expander(
         "Ask the app (local Ollama)",
@@ -714,6 +764,17 @@ if uploaded_files:
                     if "source_row" in exportable
                     else pd.Series([pd.NA] * len(new_export), dtype="object")
                 )
+                new_export["_category_reviewed"] = new_export["main_category"].ne(
+                    "General Spending"
+                )
+                approved_category_cache = load_category_cache()
+                if approved_category_cache:
+                    cached_descriptions = new_export["description"].map(
+                        lambda value: clean_description_for_matching(str(value))
+                    )
+                    new_export["_category_reviewed"] |= cached_descriptions.isin(
+                        approved_category_cache
+                    )
                 review_parts = []
                 if not filtered.empty:
                     filter_reasons = filtered["removal_reason"].tolist()
@@ -786,11 +847,15 @@ if (
     st.info(
         "Before downloading, check dates, signs and amounts, and confirm merchants and categories. "
         "Merchant names and categories can be changed in the table or with the optional AI tool below. "
+        "Unmatched spending starts unchecked in Category reviewed; assign a category or explicitly "
+        "check it to keep General Spending before downloading. "
         "Review transfers carefully: if a transfer was not caught by the rules, set its main category "
         "to Transfer. The app fills N/A and moves it to the excluded transaction review list."
     )
-    st.caption("Edit descriptions, merchants, dates and amounts directly in the table. Type, account, bank and category are selection-only.")
-    editable = complete_missing_categories(st.session_state.editable_transactions)
+    st.caption("Transactions are shown oldest to newest. Editing a date reorders the table; type, account, bank and category are selection-only except for category choices.")
+    editable = sort_rows_by_date(
+        complete_missing_categories(st.session_state.editable_transactions)
+    ).reset_index(drop=True)
     st.session_state.editable_transactions = editable
     editor_data = editable.copy()
     editor_data.insert(0, "row_number", range(1, len(editor_data) + 1))
@@ -849,6 +914,11 @@ if (
             ),
             "bank": st.column_config.SelectboxColumn("Bank", options=bank_options, required=True),
             "account": st.column_config.SelectboxColumn("Account", options=account_options, required=True),
+            "_category_reviewed": st.column_config.CheckboxColumn(
+                "Category reviewed",
+                default=False,
+                help="Uncheck to prevent download until this transaction's category is reviewed.",
+            ),
             "_source_file": None,
             "_source_row": None,
         },
@@ -859,14 +929,21 @@ if (
         edited_editor_data = all_editor_data.reset_index()
     elif search_query:
         edited_editor_data = editor_data
+    original_editor_data = editor_data.set_index("row_number")
     editor_row_numbers = edited_editor_data["row_number"].reset_index(drop=True)
     edited_source_metadata = edited_editor_data[EDITABLE_SOURCE_COLUMNS].reset_index(drop=True)
     edited_transactions = edited_editor_data.drop(
         columns=["row_number", *EDITABLE_SOURCE_COLUMNS]
     ).copy()
+    reviewed_categories = edited_source_metadata["_category_reviewed"].fillna(False).astype(bool)
+    reviewed_categories.loc[
+        edited_transactions["main_category"].astype(str) != "General Spending"
+    ] = True
+    edited_source_metadata["_category_reviewed"] = reviewed_categories
     transfer_mask = (
         edited_transactions["main_category"].astype("string").str.strip().eq("Transfer").fillna(False)
     )
+    transfers_moved = bool(transfer_mask.any())
     edited_transactions.loc[transfer_mask, "sub_category"] = CATEGORY_PAIR_TO_LABEL[("Transfer", "N/A")]
     category_pairs = edited_transactions["sub_category"].map(CATEGORY_LABEL_TO_PAIR)
     pair_mismatch = category_pairs.map(
@@ -877,9 +954,42 @@ if (
     edited_transactions["sub_category"] = category_pairs.map(
         lambda pair: pair[1] if isinstance(pair, tuple) else pd.NA
     )
+    for row_position, row in edited_transactions.iterrows():
+        if pair_mismatch.iloc[row_position] or row["main_category"] == "Transfer":
+            continue
+        editor_row_number = editor_row_numbers.iloc[row_position]
+        if pd.isna(editor_row_number) or editor_row_number not in original_editor_data.index:
+            continue
+        original_row = original_editor_data.loc[editor_row_number]
+        old_pair = CATEGORY_LABEL_TO_PAIR.get(str(original_row["sub_category"]))
+        new_pair = (str(row["main_category"]), str(row["sub_category"]))
+        was_reviewed = original_row["_category_reviewed"]
+        is_reviewed = edited_source_metadata.at[row_position, "_category_reviewed"]
+        was_reviewed = False if pd.isna(was_reviewed) else bool(was_reviewed)
+        is_reviewed = False if pd.isna(is_reviewed) else bool(is_reviewed)
+        if not is_reviewed or (old_pair == new_pair and was_reviewed):
+            continue
+        description = str(row["description"])
+        normalized_description = clean_description_for_matching(description)
+        if not normalized_description:
+            continue
+        try:
+            approve_transaction_category(description, new_pair[0], new_pair[1])
+        except (OSError, ValueError) as error:
+            st.warning(
+                "The category was applied to this session but could not be saved "
+                f"for future imports: {error}"
+            )
+        matching_rows = edited_transactions["description"].map(
+            lambda value: clean_description_for_matching(str(value))
+        ).eq(normalized_description)
+        edited_transactions.loc[matching_rows, "main_category"] = new_pair[0]
+        edited_transactions.loc[matching_rows, "sub_category"] = new_pair[1]
+        edited_source_metadata.loc[matching_rows, "_category_reviewed"] = True
+        pair_mismatch.loc[matching_rows] = False
     edited_transactions = edited_transactions[FINAL_EXPORT_COLUMNS]
     edited_transactions = edited_transactions.reset_index(drop=True)
-    if transfer_mask.any():
+    if transfers_moved:
         transfer_rows = make_transfer_review_rows(
             edited_transactions.loc[transfer_mask].reset_index(drop=True),
             source_files=edited_source_metadata.loc[transfer_mask, "_source_file"],
@@ -892,29 +1002,43 @@ if (
             f"dropped_editor_{st.session_state.dropped_editor_revision}", None
         )
         st.session_state.dropped_editor_revision += 1
-        st.session_state.pop(f"export_editor_{st.session_state.export_editor_revision}", None)
-        st.session_state.export_editor_revision += 1
         edited_transactions = edited_transactions.loc[~transfer_mask].reset_index(drop=True)
         edited_source_metadata = edited_source_metadata.loc[~transfer_mask].reset_index(drop=True)
         editor_row_numbers = editor_row_numbers.loc[~transfer_mask].reset_index(drop=True)
         pair_mismatch = pair_mismatch.loc[~transfer_mask].reset_index(drop=True)
         st.info(f"Moved {int(transfer_mask.sum())} manually marked transfer(s) to the excluded transaction review list.")
+
+    date_order = sort_rows_by_date(edited_transactions).index
+    date_order_changed = not date_order.equals(edited_transactions.index)
+    if date_order_changed:
+        edited_transactions = edited_transactions.loc[date_order].reset_index(drop=True)
+        edited_source_metadata = edited_source_metadata.loc[date_order].reset_index(drop=True)
+        editor_row_numbers = editor_row_numbers.loc[date_order].reset_index(drop=True)
+        pair_mismatch = pair_mismatch.loc[date_order].reset_index(drop=True)
+
     st.session_state.editable_transactions = pd.concat(
         [edited_transactions, edited_source_metadata], axis=1
     )[EDITABLE_COLUMNS]
+    if transfers_moved or date_order_changed:
+        st.session_state.pop(f"export_editor_{st.session_state.export_editor_revision}", None)
+        st.session_state.export_editor_revision += 1
+        st.rerun()
 
     merchant_cache = load_merchant_cache()
     candidate_rows = [
         index
         for index, row in st.session_state.editable_transactions.iterrows()
-        if merchant_needs_review(
-            str(row["description"]), str(row["merchant"]), merchant_cache
-        )
+        if not bool(row["_category_reviewed"])
+        or merchant_needs_review(str(row["description"]), str(row["merchant"]), merchant_cache)
     ]
     with st.expander(
-        f"Optional AI merchant help · {len(candidate_rows)} unresolved",
+        f"Needs category review and optional AI help · {len(candidate_rows)} unresolved",
         expanded=st.session_state.ai_review_expanded,
     ):
+        st.caption(
+            "Unreviewed transactions appear here for manual categorization or an optional local AI suggestion. "
+            "AI suggestions are never saved until you approve them."
+        )
         st.caption("Ollama runs locally. When requested, it receives only the selected description and amount plus allowed categories. Nothing is saved until you approve.")
         with st.expander("Set up Ollama (optional)", expanded=False):
             st.markdown(
@@ -1050,9 +1174,22 @@ if (
                         if selected_main != "Transfer":
                             approve_merchant_match(suggestion_description, approved_merchant)
                         updated = st.session_state.editable_transactions.copy()
-                        updated.at[suggestion_row, "merchant"] = approved_merchant
-                        updated.at[suggestion_row, "main_category"] = selected_main
-                        updated.at[suggestion_row, "sub_category"] = selected_sub
+                        normalized_description = clean_description_for_matching(
+                            suggestion_description
+                        )
+                        matching_rows = updated["description"].map(
+                            lambda value: clean_description_for_matching(str(value))
+                        ).eq(normalized_description)
+                        updated.loc[matching_rows, "merchant"] = approved_merchant
+                        updated.loc[matching_rows, "main_category"] = selected_main
+                        updated.loc[matching_rows, "sub_category"] = selected_sub
+                        updated.loc[matching_rows, "_category_reviewed"] = True
+                        if selected_main != "Transfer":
+                            approve_transaction_category(
+                                suggestion_description,
+                                selected_main,
+                                selected_sub,
+                            )
                         st.session_state.editable_transactions = updated
                         st.session_state.pop(suggestion_key, None)
                         st.session_state.merchant_cache_editor_revision += 1
@@ -1158,12 +1295,23 @@ if (
                     st.error(f"Could not save the merchant cache: {error}")
 
     download_data, validation_error = validate_final_export_rows(edited_transactions)
+    download_data = sort_rows_by_date(download_data).reset_index(drop=True)
     if pair_mismatch.any():
         validation_error = "Choose a sub-category whose displayed main category matches the Main category column."
+    unreviewed_mask = ~edited_source_metadata["_category_reviewed"].fillna(False).astype(bool)
+    if unreviewed_mask.any():
+        validation_error = (
+            f"Review the category for {int(unreviewed_mask.sum())} transaction(s) before downloading. "
+            "Choose a category or explicitly confirm General Spending."
+        )
     row_issues = get_final_export_row_issues(edited_transactions)
     for row_index in pair_mismatch[pair_mismatch].index:
         row_issues.setdefault(int(row_index), []).append(
             "Sub-category does not match the selected Main category."
+        )
+    for row_index in unreviewed_mask[unreviewed_mask].index:
+        row_issues.setdefault(int(row_index), []).append(
+            "Category needs review before download."
         )
 
     if row_issues:
@@ -1269,6 +1417,13 @@ if (
                                         selected_rows[["source_file", "source_row"]]
                                         .rename(columns={"source_file": "_source_file", "source_row": "_source_row"})
                                         .reset_index(drop=True),
+                                        pd.DataFrame(
+                                            {
+                                                "_category_reviewed": selected_rows[
+                                                    "main_category"
+                                                ].ne("General Spending").to_numpy()
+                                            }
+                                        ),
                                     ],
                                     axis=1,
                                 ),
