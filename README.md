@@ -1,4 +1,4 @@
-# Bank Statement Processor
+# Streamlit Budget Dashboard
 
 This project imports personal bank CSVs in a local Streamlit app, normalizes them to one transaction schema, applies merchant/category rules, and exports a categorized CSV. Optional local Ollama suggestions can help resolve unfamiliar merchants after the deterministic rules and cache.
 
