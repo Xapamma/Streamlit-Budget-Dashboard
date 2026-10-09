@@ -749,14 +749,52 @@ class LoadTransactionsTests(unittest.TestCase):
         app.switch_page("pages/budget.py").run()
 
         self.assertFalse(app.exception, app.exception)
+        self.assertTrue(
+            any(expander.label == "Income · Set an income" for expander in app.expander)
+        )
         displayed_main_categories = {
             expander.label.split(" · ", 1)[0]
             for expander in app.expander
             if expander.label.split(" · ", 1)[0] in category_hierarchy
         }
 
-        self.assertEqual(displayed_main_categories, set(category_hierarchy))
+        self.assertEqual(displayed_main_categories, set(category_hierarchy) - {"Transfer"})
+        self.assertNotIn("Transfer", displayed_main_categories)
         self.assertNotIn("General Spending", displayed_main_categories)
+
+    def test_budget_excludes_transfers_and_uses_edited_transaction_amounts(self):
+        transactions = pd.DataFrame(
+            [
+                ["03/10/2026", "Moved money", "Bank Transfer", "debit", -200.0, "Transfer", "N/A", "sofi", "checking", "a.csv", 2],
+                ["03/11/2026", "Market", "Market", "debit", -65.0, "Food & Dining", "Groceries", "sofi", "checking", "a.csv", 3],
+                ["03/12/2026", "Payroll", "Employer", "credit", 800.0, "Income", "Paychecks", "sofi", "checking", "a.csv", 4],
+            ],
+            columns=FINAL_EXPORT_COLUMNS + ["_source_file", "_source_row"],
+        )
+        app = AppTest.from_file("../dashboard.py")
+        app.session_state["editable_transactions"] = transactions
+        app.session_state["monthly_income"] = 800.0
+        app.session_state["monthly_budgets"] = {
+            "Food & Dining": 100.0,
+            "Food & Dining :: Groceries": 100.0,
+        }
+        app.session_state["budget_month"] = date(2026, 3, 1)
+        app.switch_page("pages/budget.py").run()
+
+        self.assertFalse(app.exception, app.exception)
+        self.assertFalse(
+            any(expander.label.startswith("Transfer") for expander in app.expander)
+        )
+        self.assertTrue(
+            any(
+                expander.label.startswith("Groceries · $65.00 spent of $100.00")
+                for expander in app.expander
+            )
+        )
+        self.assertEqual(
+            next(metric.value for metric in app.metric if metric.label == "Income remaining"),
+            "$735.00",
+        )
 
     def test_export_rows_sort_by_date_stably_and_put_invalid_dates_last(self):
         rows = pd.DataFrame(
