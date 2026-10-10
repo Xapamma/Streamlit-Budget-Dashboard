@@ -51,27 +51,14 @@ from final_export import (
     split_filtered_transactions,
     validate_final_export_rows,
 )
-import merchant_assistance
-
-if (
-    not all(
-        hasattr(merchant_assistance, helper_name)
-        for helper_name in (
-            "merge_merchant_cache_edits",
-            "suggest_merchant_and_category_with_ollama",
-            "ask_ollama_app_help",
-        )
-    )
-    or getattr(merchant_assistance, "MAX_OLLAMA_SUGGESTION_ATTEMPTS", 0) < 5
-):
-    merchant_assistance = importlib.reload(merchant_assistance)
-
+from ai_providers import AIError
+from ai_settings import render_ai_settings
 from merchant_assistance import (
-    ask_ollama_app_help,
+    ask_app_help,
     approve_merchant_match,
     merge_merchant_cache_edits,
     save_merchant_cache,
-    suggest_merchant_and_category_with_ollama,
+    suggest_merchant_and_category,
 )
 from fuzzy_search import fuzzy_match_indices
 from transaction_import import (
@@ -360,57 +347,25 @@ with st.sidebar:
                 st.session_state.pop("statement_to_remove", None)
                 st.rerun()
 
+    ai_settings = render_ai_settings()
+
     with st.expander(
-        "Ask the app (local Ollama)",
+        "Ask the app (AI help)",
         expanded=st.session_state.app_help_chat_expanded,
     ):
         st.caption(
             "Ask how to import, review, categorize, or export. This chat only sends your "
-            "question and recent chat messages to local Ollama. Do not include financial details."
+            "question and recent chat messages to your selected AI provider (set up under "
+            "AI settings). Do not include financial details."
         )
-        with st.expander("Ollama setup", expanded=False):
-            st.markdown(
-                "**1. Install Ollama for Windows.** Download and run the installer. Ollama "
-                "then runs in the background. After installation, close and reopen your terminal "
-                "so the `ollama` command is available."
-            )
-            st.link_button("Download Ollama for Windows", "https://ollama.com/download/windows")
-            st.link_button("Ollama Windows installation guide", "https://docs.ollama.com/windows")
-            st.markdown(
-                "**2. Open a terminal in this project.** In VS Code, choose **Terminal → New Terminal**. "
-                "PowerShell, Command Prompt, and Git Bash all work. Make sure the terminal is in the "
-                "project folder before running these commands:"
-            )
-            st.code(
-                "uv sync --extra ai\n"
-                "ollama --version\n"
-                "ollama list",
-                language="bash",
-            )
-            st.markdown(
-                "**3. Download a model if needed.** The app currently defaults to `gemma3:4b`; "
-                "`qwen3:8b` is an optional recommendation if your computer can run it. Check "
-                "`ollama list` first and pull only the model you want if it is not already listed. "
-                "Both model fields accept any installed Ollama model tag."
-            )
-            st.code(
-                "ollama pull gemma3:4b  # current app default, only if missing\n"
-                "ollama pull qwen3:8b   # optional alternative, only if missing",
-                language="bash",
-            )
-            st.caption(
-                "The sidebar chat history is temporary and is cleared when this app session ends."
-            )
+        st.caption(
+            "The sidebar chat history is temporary and is cleared when this app session ends."
+        )
 
         for chat_message in st.session_state.app_help_chat_messages[-12:]:
             with st.chat_message(chat_message["role"]):
                 st.markdown(chat_message["content"])
 
-        help_model = st.text_input(
-            "Local help model",
-            value="gemma3:4b",
-            key="app_help_model",
-        ).strip()
         with st.form("app_help_chat_form", clear_on_submit=True):
             help_question = st.text_input(
                 "Ask a question",
@@ -422,32 +377,21 @@ with st.sidebar:
             question = help_question.strip()
             if not question:
                 st.warning("Enter a question about using the app.")
-            elif not help_model:
-                st.warning("Enter the name of a local Ollama model.")
             else:
                 st.session_state.app_help_chat_expanded = True
                 messages = st.session_state.app_help_chat_messages
                 messages.append({"role": "user", "content": question})
                 try:
-                    with st.spinner("Ollama is answering..."):
-                        answer = ask_ollama_app_help(
+                    with st.spinner("The AI is answering..."):
+                        answer = ask_app_help(
                             question,
                             messages[:-1],
-                            model=help_model,
+                            settings=ai_settings,
                         )
-                except Exception as error:
-                    error_text = str(error)
-                    if "Ollama support is optional" in error_text:
-                        answer = (
-                            "Ollama support is not installed yet. Run `uv sync --extra ai`, "
-                            "then retry your question."
-                        )
-                    else:
-                        answer = (
-                            "I couldn't reach that Ollama model. Check that Ollama is running "
-                            "and the model is installed with `ollama list`, then try again. "
-                            f"Details: {error_text}"
-                        )
+                except AIError as error:
+                    answer = str(error)
+                except Exception:
+                    answer = "The AI request failed unexpectedly. Check your AI settings and try again."
                 messages.append({"role": "assistant", "content": answer})
                 st.session_state.app_help_chat_messages = messages[-12:]
                 st.rerun()
@@ -1057,20 +1001,14 @@ if (
         expanded=st.session_state.ai_review_expanded,
     ):
         st.caption(
-            "Unreviewed transactions appear here for manual categorization or an optional local AI suggestion. "
+            "Unreviewed transactions appear here for manual categorization or an optional AI suggestion. "
             "AI suggestions are never saved until you approve them."
         )
-        st.caption("Ollama runs locally. When requested, it receives only the selected description and amount plus allowed categories. Nothing is saved until you approve.")
-        with st.expander("Set up Ollama (optional)", expanded=False):
-            st.markdown(
-                "For Windows installation and terminal instructions, open **Ask the app → Ollama setup** "
-                "in the sidebar. In short: install Ollama, open a terminal in this project, run "
-                "`uv sync --extra ai`, and make sure the model shown in the model field is installed. "
-                "Both model fields accept any installed model tag. The current default is `gemma3:4b`; "
-                "`qwen3:8b` is an optional alternative. Leave Ollama running, then press Suggest merchant "
-                "with Ollama. Review and edit the merchant and categories before approving."
-            )
-            st.link_button("Download Ollama for Windows", "https://ollama.com/download/windows")
+        st.caption(
+            "When requested, your selected AI provider receives only the selected description "
+            "and amount plus the allowed categories (configure it under AI settings in the sidebar). "
+            "Nothing is saved until you approve."
+        )
         if not candidate_rows:
             st.info("No unresolved merchant matches need suggestions.")
         else:
@@ -1090,30 +1028,24 @@ if (
                 f"{suggestion_row}|{suggestion_description}".encode("utf-8")
             ).hexdigest()[:12]
             suggestion_key = f"ai_merchant_suggestion_{suggestion_fingerprint}"
-            ai_model = st.text_input(
-                "Local Ollama model",
-                value="gemma3:4b",
-                key=f"ai_model_{st.session_state.export_editor_revision}",
-            ).strip()
-            if st.button("Suggest merchant with Ollama", key=f"suggest_{suggestion_fingerprint}"):
+            if st.button("Suggest merchant with AI", key=f"suggest_{suggestion_fingerprint}"):
                 st.session_state.ai_review_expanded = True
-                if not ai_model:
-                    st.error("Enter a local Ollama model name.")
-                else:
-                    try:
-                        with st.spinner("Asking local Ollama for a merchant and category suggestion..."):
-                            suggestion = suggest_merchant_and_category_with_ollama(
-                                suggestion_description,
-                                float(suggestion_transaction["amount"]),
-                                CATEGORY_SUBCATEGORIES,
-                                model=ai_model,
-                            )
-                        st.session_state[suggestion_key] = {
-                            "description": suggestion_description,
-                            **suggestion,
-                        }
-                    except Exception as error:
-                        st.error(f"Ollama suggestion failed: {error}")
+                try:
+                    with st.spinner("Asking the AI for a merchant and category suggestion..."):
+                        suggestion = suggest_merchant_and_category(
+                            suggestion_description,
+                            float(suggestion_transaction["amount"]),
+                            CATEGORY_SUBCATEGORIES,
+                            settings=ai_settings,
+                        )
+                    st.session_state[suggestion_key] = {
+                        "description": suggestion_description,
+                        **suggestion,
+                    }
+                except AIError as error:
+                    st.error(str(error))
+                except Exception:
+                    st.error("AI suggestion failed unexpectedly. Check your AI settings and try again.")
 
             pending_suggestion = st.session_state.get(suggestion_key)
             if pending_suggestion and pending_suggestion.get("description") == suggestion_description:

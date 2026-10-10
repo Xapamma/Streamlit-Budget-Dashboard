@@ -1,4 +1,4 @@
-"""Optional local Ollama merchant suggestions and explicit cache approval."""
+"""AI merchant suggestions (via the user's selected provider) and explicit cache approval."""
 
 from __future__ import annotations
 
@@ -6,66 +6,18 @@ import json
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from ai_providers import AISettings, chat, chat_json
 from cleaning_logic import clean_description_for_matching
 
-MAX_OLLAMA_SUGGESTION_ATTEMPTS = 5
+MAX_SUGGESTION_ATTEMPTS = 5
 
 
-def _request_ollama_json(prompt: str, model: str) -> dict:
-    try:
-        import ollama
-    except ImportError as error:
-        raise RuntimeError(
-            "Ollama support is optional. Install it with `uv sync --extra ai`, "
-            "then retry the suggestion."
-        ) from error
-
-    response = ollama.chat(
-        model=model,
-        format="json",
-        messages=[
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        ],
-    )
-    message = response.get("message", {}) if isinstance(response, dict) else response.message
-    content = message.get("content", "") if isinstance(message, dict) else message.content
-    try:
-        payload = json.loads(content)
-    except (TypeError, json.JSONDecodeError) as error:
-        raise ValueError("Ollama returned invalid JSON.") from error
-    if not isinstance(payload, dict):
-        raise ValueError("Ollama must return a JSON object.")
-    return payload
-
-
-def suggest_merchant_with_ollama(
-    description: str,
-    *,
-    model: str = "gemma3:4b",
-) -> str:
-    """Ask the locally running Ollama model for a merchant name suggestion."""
-    payload = _request_ollama_json(
-        "Identify the merchant in this bank transaction description. "
-        "Return only a JSON object with one string field named merchant. "
-        "Do not infer a category or invent a merchant. If uncertain, use "
-        f"the cleaned description.\n\nDescription: {description}",
-        model,
-    )
-    merchant = payload.get("merchant") if isinstance(payload, dict) else None
-    if not isinstance(merchant, str) or not merchant.strip():
-        raise ValueError("Ollama did not return a merchant name.")
-    return merchant.strip()
-
-
-def suggest_merchant_and_category_with_ollama(
+def suggest_merchant_and_category(
     description: str,
     amount: float,
     category_subcategories: Mapping[str, Sequence[str]],
     *,
-    model: str = "gemma3:4b",
+    settings: AISettings | None,
 ) -> dict[str, str]:
     """Suggest a merchant and valid category, retrying malformed output up to five times."""
     valid_categories = {
@@ -88,7 +40,7 @@ def suggest_merchant_and_category_with_ollama(
     last_merchant = ""
     last_error = "the response was incomplete"
 
-    for attempt in range(MAX_OLLAMA_SUGGESTION_ATTEMPTS):
+    for attempt in range(MAX_SUGGESTION_ATTEMPTS):
         prompt = base_prompt
         if attempt:
             prompt = (
@@ -98,7 +50,7 @@ def suggest_merchant_and_category_with_ollama(
                 + base_prompt
             )
         try:
-            payload = _request_ollama_json(prompt, model)
+            payload = chat_json(settings, prompt)
         except ValueError as error:
             last_error = str(error)
             continue
@@ -127,8 +79,8 @@ def suggest_merchant_and_category_with_ollama(
 
     if not last_merchant:
         raise ValueError(
-            f"Ollama could not identify a merchant after {MAX_OLLAMA_SUGGESTION_ATTEMPTS} attempts. "
-            "Check that Ollama is running, then press Suggest merchant with Ollama to try again."
+            f"The AI could not identify a merchant after {MAX_SUGGESTION_ATTEMPTS} attempts. "
+            "Check your AI settings, then press Suggest merchant to try again."
         )
 
     return {
@@ -136,7 +88,7 @@ def suggest_merchant_and_category_with_ollama(
         "main_category": fallback_main,
         "sub_category": fallback_sub,
         "category_warning": (
-            f"Ollama returned an invalid category after {MAX_OLLAMA_SUGGESTION_ATTEMPTS} attempts. "
+            f"The AI returned an invalid category after {MAX_SUGGESTION_ATTEMPTS} attempts. "
             "A sign-based fallback is selected; "
             "review the category before approving."
         ),
@@ -195,7 +147,7 @@ payments, and declined transactions can be reviewed, and valid excluded transact
 be restored. Fix validation issues before downloading.
 
 Categories: known merchant rules and the local merchant cache are applied first.
-Unresolved merchants can be sent to local Ollama only when the user requests a
+Unresolved merchants can be sent to the user-selected AI provider only when the user requests a
 suggestion. The merchant and category remain editable; only approval updates the
 preview and cache. The cache editor supports search, add, edit, delete, and save.
 
@@ -211,34 +163,19 @@ separate for each selected month.
 Privacy: this help chat receives only the user's question and recent help-chat turns.
 It cannot see uploaded files, transactions, or the merchant cache. Do not ask users to
 paste account numbers, transaction descriptions, or other financial details. The chat
-and its history are kept only in the current Streamlit session. To install on Windows,
-download and run the OllamaSetup.exe installer from https://ollama.com/download/windows.
-Ollama runs in the background after installation. Then open a terminal in the project
-folder (VS Code Terminal > New Terminal, PowerShell, Command Prompt, or Git Bash), and
-run `uv sync --extra ai`, `ollama --version`, and `ollama list`. Close and reopen the
-terminal after installing Ollama if the command is not found. The model fields accept
-any installed Ollama model tag. The app defaults to `gemma3:4b`; `qwen3:8b` is an
-optional recommendation if the computer can run it. Pull only a model that is missing."""
+and its history are kept only in the current Streamlit session."""
 
 
-def ask_ollama_app_help(
+def ask_app_help(
     question: str,
     history: Sequence[Mapping[str, str]] = (),
     *,
-    model: str = "gemma3:4b",
+    settings: AISettings | None,
 ) -> str:
     """Answer an app-usage question without including transaction data."""
     clean_question = question.strip()
     if not clean_question:
         raise ValueError("Enter a question about using the app.")
-
-    try:
-        import ollama
-    except ImportError as error:
-        raise RuntimeError(
-            "Ollama support is optional. Install it with `uv sync --extra ai`, "
-            "then retry your question."
-        ) from error
 
     messages = [{"role": "system", "content": APP_HELP_GUIDE}]
     for message in history[-8:]:
@@ -248,18 +185,7 @@ def ask_ollama_app_help(
             messages.append({"role": role, "content": content})
     messages.append({"role": "user", "content": clean_question})
 
-    response = ollama.chat(model=model, messages=messages)
-    response_message = (
-        response.get("message", {}) if isinstance(response, dict) else response.message
-    )
-    content = (
-        response_message.get("content", "")
-        if isinstance(response_message, dict)
-        else response_message.content
-    )
-    if not isinstance(content, str) or not content.strip():
-        raise ValueError("Ollama returned an empty help response. Try asking again.")
-    return content.strip()
+    return chat(settings, messages).strip()
 
 
 def save_merchant_cache(

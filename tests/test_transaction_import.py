@@ -3,7 +3,6 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
@@ -39,11 +38,11 @@ from final_export import (
 )
 from merchant_assistance import (
     approve_merchant_match,
-    ask_ollama_app_help,
+    ask_app_help,
     load_merchant_cache,
     merge_merchant_cache_edits,
     save_merchant_cache,
-    suggest_merchant_and_category_with_ollama,
+    suggest_merchant_and_category,
 )
 from bank_profiles import load_bank_profiles, save_bank_profile
 from fuzzy_search import fuzzy_match_indices
@@ -261,134 +260,73 @@ class LoadTransactionsTests(unittest.TestCase):
         self.assertEqual(revised, {"electric bill": "Power Utility", "coffee shop": "New Coffee Name"})
         self.assertEqual(deleted, {"electric bill": "Power Utility"})
 
-    def test_ollama_category_suggestion_uses_only_allowed_category_pairs(self):
-        response = {
-            "message": {
-                "content": json.dumps(
-                    {
-                        "merchant": "Krazy Plant Shop",
-                        "main_category": "Shopping & Supplies",
-                        "sub_category": "General Retail",
-                    }
-                )
-            }
+    def _suggestion_payload(self, **overrides):
+        return {
+            "merchant": "Krazy Plant Shop",
+            "main_category": "Shopping & Supplies",
+            "sub_category": "General Retail",
+            **overrides,
         }
-        fake_ollama = SimpleNamespace(chat=lambda **_: response)
+
+    def test_ai_category_suggestion_uses_only_allowed_category_pairs(self):
         allowed = {"Shopping & Supplies": ["General Retail"]}
-
-        with patch.dict("sys.modules", {"ollama": fake_ollama}):
-            suggestion = suggest_merchant_and_category_with_ollama(
-                "UNRECOGNIZED XYZ", -19.0, allowed
+        with patch("merchant_assistance.chat_json", return_value=self._suggestion_payload()):
+            suggestion = suggest_merchant_and_category(
+                "UNRECOGNIZED XYZ", -19.0, allowed, settings=None
             )
 
-        self.assertEqual(
-            suggestion,
-            {
-                "merchant": "Krazy Plant Shop",
-                "main_category": "Shopping & Supplies",
-                "sub_category": "General Retail",
-            },
-        )
+        self.assertEqual(suggestion, self._suggestion_payload())
 
-    def test_ollama_category_suggestion_rejects_unknown_pairs(self):
-        response = {
-            "message": {
-                "content": json.dumps(
-                    {
-                        "merchant": "Krazy Plant Shop",
-                        "main_category": "Shopping & Supplies",
-                        "sub_category": "Unlisted Category",
-                    }
-                )
-            }
-        }
-        calls = []
-
-        def mock_chat(**_):
-            calls.append(True)
-            return response
-
-        fake_ollama = SimpleNamespace(chat=mock_chat)
-
-        with patch.dict("sys.modules", {"ollama": fake_ollama}):
-            suggestion = suggest_merchant_and_category_with_ollama(
-                "UNRECOGNIZED XYZ", -19.0, {"Shopping & Supplies": ["General Retail"]}
+    def test_ai_category_suggestion_rejects_unknown_pairs(self):
+        payload = self._suggestion_payload(sub_category="Unlisted Category")
+        with patch("merchant_assistance.chat_json", return_value=payload) as mock_chat:
+            suggestion = suggest_merchant_and_category(
+                "UNRECOGNIZED XYZ", -19.0, {"Shopping & Supplies": ["General Retail"]}, settings=None
             )
 
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(mock_chat.call_count, 5)
         self.assertEqual(suggestion["merchant"], "Krazy Plant Shop")
         self.assertEqual(suggestion["main_category"], "General Spending")
         self.assertEqual(suggestion["sub_category"], "Other")
         self.assertIn("invalid category after 5 attempts", suggestion["category_warning"])
 
-    def test_ollama_category_suggestion_recovers_on_fifth_attempt(self):
-        valid_response = {
-            "message": {
-                "content": json.dumps(
-                    {
-                        "merchant": "Krazy Plant Shop",
-                        "main_category": "Shopping & Supplies",
-                        "sub_category": "General Retail",
-                    }
-                )
-            }
-        }
-        responses = iter(
-            [
-                {"message": {"content": "not json"}},
-                {"message": {"content": "not json"}},
-                {"message": {"content": "not json"}},
-                {"message": {"content": "not json"}},
-                valid_response,
-            ]
-        )
-        calls = []
-
-        def mock_chat(**_):
-            calls.append(True)
-            return next(responses)
-
-        with patch.dict("sys.modules", {"ollama": SimpleNamespace(chat=mock_chat)}):
-            suggestion = suggest_merchant_and_category_with_ollama(
-                "UNRECOGNIZED XYZ", -19.0, {"Shopping & Supplies": ["General Retail"]}
+    def test_ai_category_suggestion_recovers_on_fifth_attempt(self):
+        responses = [ValueError("The AI returned invalid JSON.")] * 4 + [self._suggestion_payload()]
+        with patch("merchant_assistance.chat_json", side_effect=responses) as mock_chat:
+            suggestion = suggest_merchant_and_category(
+                "UNRECOGNIZED XYZ", -19.0, {"Shopping & Supplies": ["General Retail"]}, settings=None
             )
 
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(mock_chat.call_count, 5)
         self.assertEqual(suggestion["sub_category"], "General Retail")
         self.assertNotIn("category_warning", suggestion)
 
-    def test_ollama_category_suggestion_explains_missing_merchant(self):
-        response = {"message": {"content": json.dumps({"merchant": ""})}}
-        calls = []
-
-        def mock_chat(**_):
-            calls.append(True)
-            return response
-
-        with patch.dict("sys.modules", {"ollama": SimpleNamespace(chat=mock_chat)}):
+    def test_ai_category_suggestion_explains_missing_merchant(self):
+        with patch("merchant_assistance.chat_json", return_value={"merchant": ""}) as mock_chat:
             with self.assertRaisesRegex(ValueError, "after 5 attempts"):
-                suggest_merchant_and_category_with_ollama(
-                    "UNRECOGNIZED XYZ", -19.0, {"Shopping & Supplies": ["General Retail"]}
+                suggest_merchant_and_category(
+                    "UNRECOGNIZED XYZ", -19.0, {"Shopping & Supplies": ["General Retail"]}, settings=None
                 )
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(mock_chat.call_count, 5)
+
+    def test_ai_category_suggestion_does_not_retry_provider_errors(self):
+        from ai_providers import AIError
+
+        with patch("merchant_assistance.chat_json", side_effect=AIError("bad key")) as mock_chat:
+            with self.assertRaises(AIError):
+                suggest_merchant_and_category("X", -1.0, {"A": ["B"]}, settings=None)
+        self.assertEqual(mock_chat.call_count, 1)
 
     def test_app_help_chat_uses_only_bounded_help_history(self):
-        captured = {}
-        fake_ollama = SimpleNamespace(
-            chat=lambda **kwargs: (
-                captured.update(kwargs)
-                or {"message": {"content": "Choose your bank and map the columns."}}
-            )
-        )
         history = [
             {"role": "user" if index % 2 == 0 else "assistant", "content": f"help turn {index}"}
             for index in range(10)
         ]
 
-        with patch.dict("sys.modules", {"ollama": fake_ollama}):
-            answer = ask_ollama_app_help("How do I import a file?", history)
+        with patch("merchant_assistance.chat", return_value="Choose your bank and map the columns.") as mock_chat:
+            answer = ask_app_help("How do I import a file?", history, settings=None)
 
-        sent_messages = captured["messages"]
+        sent_messages = mock_chat.call_args.args[1]
         self.assertEqual(answer, "Choose your bank and map the columns.")
         self.assertEqual(len(sent_messages), 10)
         self.assertEqual(sent_messages[0]["role"], "system")

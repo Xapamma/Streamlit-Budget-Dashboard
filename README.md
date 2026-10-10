@@ -1,6 +1,6 @@
 # Streamlit Budget Dashboard
 
-This project imports personal bank CSVs in a local Streamlit app, normalizes them to one transaction schema, applies merchant/category rules, and exports a categorized CSV. Optional local Ollama suggestions can help resolve unfamiliar merchants after the deterministic rules and cache.
+This project imports personal bank CSVs in a local Streamlit app, normalizes them to one transaction schema, applies merchant/category rules, and exports a categorized CSV. Optional AI suggestions (bring your own API key) can help resolve unfamiliar merchants after the deterministic rules and cache.
 
 ---
 
@@ -11,8 +11,8 @@ This project imports personal bank CSVs in a local Streamlit app, normalizes the
 - Re-import a file with changed settings to replace that filename's rows; removing an upload removes its imported, edited, and excluded rows.
 - Review and edit dates, descriptions, merchants, amounts, categories, and transaction types before export.
 - Review declined, payment, and transfer rows with reasons; restore selected rows after validation.
-- Optionally request a local Ollama merchant suggestion for unresolved transactions and explicitly approve it into the local merchant cache.
-- Ask app-usage questions in the sidebar's local Ollama help chat; it only receives the question and a short help conversation, not imported transaction data.
+- Optionally request an AI merchant suggestion (Gemini, OpenRouter, Ollama Cloud, or local Ollama) for unresolved transactions and explicitly approve it into the local merchant cache.
+- Ask app-usage questions in the sidebar's AI help chat; it only receives the question and a short help conversation, not imported transaction data.
 - Save a reusable CSV format for each bank, including custom banks, so future imports reuse its delimiter, amount rules, account type, and column mapping.
 - Search transactions and the merchant cache with case-insensitive fuzzy matching.
 - Navigate between Home, statement processing, Overview, Analytics, and Budget pages.
@@ -22,7 +22,7 @@ This project imports personal bank CSVs in a local Streamlit app, normalizes the
 
 ## Privacy
 
-Bank data is sensitive. `.data/`, the generated categorized CSV, `merchant_cache.json`, and `bank_profiles.json` are ignored and excluded from version control for new commits. The app processes CSV data locally. Ollama runs locally as well; it is not called unless the user requests a suggestion. Files previously pushed to a remote remain in Git history unless that history is separately rewritten.
+Bank data is sensitive. `.data/`, the generated categorized CSV, `merchant_cache.json`, and `bank_profiles.json` are ignored and excluded from version control for new commits. The app processes CSV data locally. AI providers are not called unless the user configures one and requests a suggestion or help answer; then only the selected description, amount, and allowed categories (or the help question) are sent. Files previously pushed to a remote remain in Git history unless that history is separately rewritten.
 
 ## Project Structure
 - `dashboard.py`: multipage Streamlit entrypoint and navigation.
@@ -32,7 +32,9 @@ Bank data is sensitive. `.data/`, the generated categorized CSV, `merchant_cache
 - `transaction_import.py`: canonical transaction normalization and validation.
 - `final_export.py`: merchant resolution, exclusions, categories, validation, and export formatting.
 - `cleaning_logic.py`: merchant rules and category hierarchy.
-- `merchant_assistance.py`: optional Ollama suggestions and approved cache writes.
+- `merchant_assistance.py`: AI merchant suggestions and approved cache writes.
+- `ai_providers.py`: provider calls (Gemini, OpenRouter, Ollama Cloud/local) using user-supplied keys.
+- `ai_settings.py`: sidebar AI provider, model, and key settings.
 - `bank_profiles.py`: local saved CSV formats for built-in and custom banks.
 - `fuzzy_search.py`: shared fuzzy matching for local search fields.
 - `tests/test_transaction_import.py`: importer/exporter regression tests.
@@ -49,18 +51,7 @@ uv sync
 uv run streamlit run dashboard.py
 ```
 
-Ollama is optional. To enable local suggestions and help chat on Windows:
-
-1. [Download Ollama for Windows](https://ollama.com/download/windows) and run the downloaded `OllamaSetup.exe` installer. Ollama runs in the background after installation.
-2. Open the project folder in VS Code and choose **Terminal → New Terminal**. PowerShell, Command Prompt, and Git Bash all work. Run the following from the project folder:
-
-```bash
-uv sync --extra ai
-ollama --version
-ollama list
-```
-
-If `ollama` is not recognized, close and reopen the terminal. The app defaults to `gemma3:4b`; `qwen3:8b` is an optional recommendation if your computer can run it. Both model fields accept any model tag installed in Ollama. Use `ollama pull <model-tag>` in the terminal only when the model you want is not listed by `ollama list`. See the [Ollama Windows installation guide](https://docs.ollama.com/windows) for troubleshooting.
+AI is optional. See [AI providers](#ai-providers) below.
 
 ---
 
@@ -82,11 +73,28 @@ Upload one or more bank statement CSVs, choose each file, select its bank and ac
 
 Imported, edited, and excluded-review rows remain in the session when you leave Process statements or remove a file from the uploader. Use **Remove one statement's data** or **Clear imported data** to delete them explicitly. Re-submitting the same filename with changed columns, sign convention, delimiter, or number format replaces its previous rows. Submitting an unchanged file with unchanged settings is blocked to avoid duplicates. Filenames must be unique among the currently uploaded statements.
 
-The download uses the same nine columns as the example file: `date`, `description`, `merchant`, `type`, `amount`, `main_category`, `sub_category`, `bank`, and `account`. Export dates use `MM/DD/YYYY`. The editable preview and download are sorted oldest to newest by transaction date, including after date edits; invalid dates remain at the bottom for correction. Before downloading, review dates, signs, amounts, merchants, and categories. Unmatched spending is flagged for category review and blocks download until you assign a category or explicitly confirm General Spending. Approved category pairs are saved by normalized transaction description and reused for matching rows and future imports. For a transfer not caught by the rules, set its main category to `Transfer`; the subcategory becomes `N/A`, and the row moves to the excluded review list instead of the export. Search the editable transaction preview and merchant cache by text; searches ignore case and tolerate typos, and filtering does not remove hidden transactions or cache entries. Known descriptions use the existing merchant rules and cache; unrecognized descriptions appear in the review queue. For an unresolved transaction, the optional Ollama tool suggests a merchant and a main/subcategory from the app's allowed choices. Known merchant rules take precedence; for a new merchant, the AI category pair is preselected. Review and edit suggestions before approval updates the preview and local cache. The unresolved count updates as matches are approved. The Personal merchant cache panel lets you add, edit, and delete cached mappings, then save them locally.
+The download uses the same nine columns as the example file: `date`, `description`, `merchant`, `type`, `amount`, `main_category`, `sub_category`, `bank`, and `account`. Export dates use `MM/DD/YYYY`. The editable preview and download are sorted oldest to newest by transaction date, including after date edits; invalid dates remain at the bottom for correction. Before downloading, review dates, signs, amounts, merchants, and categories. Unmatched spending is flagged for category review and blocks download until you assign a category or explicitly confirm General Spending. Approved category pairs are saved by normalized transaction description and reused for matching rows and future imports. For a transfer not caught by the rules, set its main category to `Transfer`; the subcategory becomes `N/A`, and the row moves to the excluded review list instead of the export. Search the editable transaction preview and merchant cache by text; searches ignore case and tolerate typos, and filtering does not remove hidden transactions or cache entries. Known descriptions use the existing merchant rules and cache; unrecognized descriptions appear in the review queue. For an unresolved transaction, the optional AI tool suggests a merchant and a main/subcategory from the app's allowed choices. Known merchant rules take precedence; for a new merchant, the AI category pair is preselected. Review and edit suggestions before approval updates the preview and local cache. The unresolved count updates as matches are approved. The Personal merchant cache panel lets you add, edit, and delete cached mappings, then save them locally.
 
-To use Ollama, check available local models with `ollama list` in a terminal. The current default is `gemma3:4b`, and `qwen3:8b` is a recommended alternative. Both the help chat and merchant-suggestion model fields accept any installed model tag. Pull a model only if you choose it and it is not already listed. Leave Ollama running, then request a suggestion in the app. The optional setup instructions and Ollama download link are also available in the app. Suggestions are requested only when you press the button; approved matches are saved locally.
+For an unresolved transaction, choose a provider under **AI settings** in the sidebar first (see [AI providers](#ai-providers)).
 
 The download columns are `date`, `description`, `merchant`, `type`, `amount`, `main_category`, `sub_category`, `bank`, and `account`. Dates export as `MM/DD/YYYY`.
+
+## AI providers
+
+Open **AI settings** in the sidebar, choose a provider, paste your own API key, pick a model, confirm the privacy notice, and optionally press **Test connection**. You pay for and are responsible for your own usage, quotas, and the provider's terms; free tiers and model names change, so check each provider's pricing page.
+
+| Provider | Get a key | Privacy / pricing |
+| --- | --- | --- |
+| Google Gemini | [AI Studio](https://aistudio.google.com/apikey) | [Terms](https://ai.google.dev/gemini-api/terms), [pricing](https://ai.google.dev/gemini-api/docs/pricing) |
+| OpenRouter | [Keys](https://openrouter.ai/keys) | [Privacy](https://openrouter.ai/privacy), [models](https://openrouter.ai/models) |
+| Ollama Cloud | [Keys](https://ollama.com/settings/keys) | [Privacy](https://ollama.com/privacy), [docs](https://docs.ollama.com/cloud) |
+| Ollama (local) | no key; [install Ollama](https://ollama.com/download) and `ollama pull <model>` | runs on your computer; only works when the app also runs locally |
+
+- Keys live only in your Streamlit session memory; they are never written to disk, the database, or logs. **Clear API key** removes it. A password field only hides the key on screen, and the hosting server still handles it, so use a spend-limited key and revoke it afterward.
+- Free tiers may use your prompts for training or human review. The app shows a notice per provider and requires confirmation for cloud providers. Never include sensitive details in the help chat; suggestions send only a transaction description and amount.
+- Nothing is sent to a provider other than the one you selected, and there is no automatic fallback. Model names listed are suggestions that are not verified; type any model your provider supports.
+- Deploying to Streamlit Community Cloud needs no app-level AI secret. Don't put user keys in the app's shared secrets. Local files such as the merchant cache are not guaranteed to persist there.
+- To refresh dependencies after this change run `uv lock` (the old optional `ai` extra was removed).
 
 ## Current Scope
 

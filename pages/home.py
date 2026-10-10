@@ -25,4 +25,4 @@ st.info(
     "Imported transactions and budget targets are kept in your current Streamlit session. "
     "They are cleared when that session ends; download your categorized transactions to keep a copy."
 )
-st.caption("Ollama merchant suggestions are optional. Categorization rules, review, analytics, and budgeting work without AI.")
+st.caption("AI merchant suggestions (bring your own provider key) are optional. Categorization rules, review, analytics, and budgeting work without AI.")

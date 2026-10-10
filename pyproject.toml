@@ -12,6 +12,3 @@ dependencies = [
     "rapidfuzz>=3.14.3",
     "streamlit>=1.45.0",
 ]
-
-[project.optional-dependencies]
-ai = ["ollama>=0.6.1"]
