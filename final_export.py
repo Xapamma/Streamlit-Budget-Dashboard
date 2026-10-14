@@ -416,36 +416,6 @@ def load_category_cache(cache_path: str | Path | None = None) -> dict[str, dict[
     return approved
 
 
-def approve_transaction_category(
-    description: str,
-    main_category: str,
-    sub_category: str,
-    *,
-    cache_path: str | Path | None = None,
-) -> str:
-    """Persist an explicitly approved category pair for a normalized description."""
-    normalized_description = clean_description_for_matching(description)
-    if not normalized_description:
-        raise ValueError("A non-empty transaction description is required to save a category.")
-    if (
-        main_category not in CATEGORY_SUBCATEGORIES
-        or main_category == "Transfer"
-        or sub_category not in CATEGORY_SUBCATEGORIES[main_category]
-    ):
-        raise ValueError("Choose a valid, non-transfer category pair before saving it.")
-
-    path = Path(cache_path) if cache_path is not None else CATEGORY_CACHE_PATH
-    cache = load_category_cache(path)
-    cache[normalized_description] = {
-        "main_category": main_category,
-        "sub_category": sub_category,
-    }
-    with path.open("w", encoding="utf-8") as cache_file:
-        json.dump(cache, cache_file, indent=2, ensure_ascii=True)
-        cache_file.write("\n")
-    return normalized_description
-
-
 def _fuzzy_match(description: str, choices: list[str]) -> tuple[str | None, float]:
     if not choices:
         return None, 0

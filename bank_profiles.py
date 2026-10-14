@@ -1,10 +1,14 @@
-"""Local storage for reusable bank CSV import formats."""
+"""Read-only seed of reusable bank CSV import formats.
+
+Bank format profiles are seed data provided with the app. They are loaded each
+session and never written from the Streamlit UI.
+"""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 
 def load_bank_profiles(profile_path: str | Path | None = None) -> dict[str, dict[str, Any]]:
@@ -20,23 +24,3 @@ def load_bank_profiles(profile_path: str | Path | None = None) -> dict[str, dict
         for name, profile in profiles.items()
         if isinstance(name, str) and isinstance(profile, dict)
     }
-
-
-def save_bank_profile(
-    bank_name: str,
-    profile: Mapping[str, Any],
-    profile_path: str | Path | None = None,
-) -> None:
-    name = bank_name.strip()
-    if not name:
-        raise ValueError("A bank name is required to save an import format.")
-
-    path = Path(profile_path) if profile_path is not None else Path(__file__).with_name("bank_profiles.json")
-    profiles = load_bank_profiles(path)
-    profiles[name] = dict(profile)
-    temporary_path = path.with_suffix(path.suffix + ".tmp")
-    temporary_path.write_text(
-        json.dumps(profiles, indent=2, ensure_ascii=True) + "\n",
-        encoding="utf-8",
-    )
-    temporary_path.replace(path)

@@ -9,7 +9,7 @@ import altair as alt
 
 import dashboard_data
 
-if getattr(dashboard_data, "CATEGORY_EDIT_API_VERSION", 0) < 3:
+if getattr(dashboard_data, "CATEGORY_EDIT_API_VERSION", 0) < 4:
     importlib.reload(dashboard_data)
 
 from dashboard_data import (
@@ -32,7 +32,7 @@ transactions = prepare_analytics_transactions(st.session_state.get("editable_tra
 if transactions.empty:
     st.info("Import a statement to explore spending and savings trends.")
     st.page_link(
-        st.session_state["budget_dashboard_pages"]["process"],
+        "app.py",
         label="Process bank statements",
         icon=":material/upload_file:",
     )
@@ -286,8 +286,6 @@ else:
     updated_transactions, categories_changed, category_mismatch = apply_transaction_category_edits(
         st.session_state.editable_transactions,
         edited_transactions,
-        persist_category_mappings=True,
-        persist_merchant_mappings=True,
     )
     if category_mismatch:
         st.error("Choose a sub-category matching its main category. Use Process statements to mark transfers.")

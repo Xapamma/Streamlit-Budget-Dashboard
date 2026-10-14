@@ -1,4 +1,9 @@
-"""AI merchant suggestions (via the user's selected provider) and explicit cache approval."""
+"""AI merchant suggestions (via the user's selected provider) and app help.
+
+The merchant/category master mapping files are treated as read-only seed data.
+This module never writes them from the app; suggestions apply only to the
+current Streamlit session.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +12,6 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from ai_providers import AISettings, chat, chat_json
-from cleaning_logic import clean_description_for_matching
 
 MAX_SUGGESTION_ATTEMPTS = 5
 
@@ -30,7 +34,7 @@ def suggest_merchant_and_category(
         "Choose the category pair only from the allowed choices below. Use the description, "
         "merchant, and signed amount. Negative amounts are spending; positive amounts are income. "
         "Choose the most specific category supported by the transaction details. Use General Spending / Other "
-        "only when no listed spending category is supported; every suggestion will be reviewed before saving.\n\n"
+        "only when no listed spending category is supported; every suggestion will be reviewed before applying.\n\n"
         f"Description: {description}\nAmount: {amount}\n"
         f"Allowed category pairs: {json.dumps(valid_categories, ensure_ascii=True)}"
     )
@@ -95,25 +99,85 @@ def suggest_merchant_and_category(
     }
 
 
-def approve_merchant_match(
-    description: str,
-    merchant: str,
+def suggest_merchant_categories_batch(
+    transactions: Sequence[Mapping[str, str | float]],
+    category_subcategories: Mapping[str, Sequence[str]],
     *,
-    cache_path: str | Path | None = None,
-) -> str:
-    """Save a user-approved merchant under the same normalized cache key as the app."""
-    normalized_description = clean_description_for_matching(description)
-    approved_merchant = merchant.strip()
-    if not normalized_description:
-        raise ValueError("A non-empty transaction description is required to save a match.")
-    if not approved_merchant:
-        raise ValueError("A non-empty merchant name is required to save a match.")
+    settings: AISettings | None,
+) -> dict[str, dict[str, str]]:
+    """Return validated suggestions for a batch of transactions in one provider request."""
+    if not transactions:
+        raise ValueError("At least one transaction is required for a category suggestion.")
 
-    path = Path(cache_path) if cache_path is not None else Path(__file__).with_name("merchant_cache.json")
-    cache = load_merchant_cache(path)
-    cache[normalized_description] = approved_merchant
-    save_merchant_cache(cache, path)
-    return normalized_description
+    transaction_ids: set[str] = set()
+    prompt_transactions = []
+    for transaction in transactions:
+        transaction_id = str(transaction.get("id", "")).strip()
+        description = str(transaction.get("description", "")).strip()
+        amount = transaction.get("amount")
+        if not transaction_id or transaction_id in transaction_ids:
+            raise ValueError("Each transaction must have a unique, non-empty ID.")
+        if not description:
+            raise ValueError("Each transaction must have a non-empty description.")
+        if not isinstance(amount, (int, float)):
+            raise ValueError("Each transaction must have a numeric amount.")
+        transaction_ids.add(transaction_id)
+        prompt_transactions.append(
+            {"id": transaction_id, "description": description, "amount": amount}
+        )
+
+    valid_categories = {
+        main_category: list(subcategories)
+        for main_category, subcategories in category_subcategories.items()
+    }
+    prompt = (
+        "Categorize every bank transaction below and identify its most likely merchant. "
+        "Return only one JSON object with a suggestions array. Each array item must contain "
+        "the exact input id and string fields merchant, main_category, and sub_category. "
+        "Return exactly one item for every input transaction, without omissions or duplicates. "
+        "Choose category pairs only from the allowed choices. Negative amounts are spending; "
+        "positive amounts are income. Use the most specific category supported by the details. "
+        "Use General Spending / Other only when no listed spending category is supported.\n\n"
+        f"Transactions: {json.dumps(prompt_transactions, ensure_ascii=True)}\n"
+        f"Allowed category pairs: {json.dumps(valid_categories, ensure_ascii=True)}"
+    )
+    payload = chat_json(settings, prompt)
+    suggestions = payload.get("suggestions")
+    if not isinstance(suggestions, list):
+        raise ValueError("The AI response must contain a suggestions array.")
+
+    results: dict[str, dict[str, str]] = {}
+    for suggestion in suggestions:
+        if not isinstance(suggestion, dict):
+            raise ValueError("Each AI suggestion must be a JSON object.")
+        transaction_id = suggestion.get("id")
+        merchant = suggestion.get("merchant")
+        main_category = suggestion.get("main_category")
+        sub_category = suggestion.get("sub_category")
+        if (
+            not isinstance(transaction_id, str)
+            or transaction_id not in transaction_ids
+            or transaction_id in results
+        ):
+            raise ValueError("The AI returned an unknown or duplicate transaction ID.")
+        if not isinstance(merchant, str) or not merchant.strip():
+            raise ValueError("The AI returned a suggestion without a merchant.")
+        if (
+            not isinstance(main_category, str)
+            or main_category not in valid_categories
+            or not isinstance(sub_category, str)
+            or sub_category not in valid_categories[main_category]
+        ):
+            raise ValueError("The AI returned a category outside the allowed choices.")
+        results[transaction_id] = {
+            "merchant": merchant.strip(),
+            "main_category": main_category,
+            "sub_category": sub_category,
+        }
+
+    if set(results) != transaction_ids:
+        raise ValueError("The AI did not return a suggestion for every transaction.")
+    return results
 
 
 def load_merchant_cache(cache_path: str | Path | None = None) -> dict[str, str]:
@@ -135,7 +199,8 @@ instead of inventing behavior.
 Workflow: upload one or more bank CSV files; select the statement, bank, and account;
 map date, description, and amount (or debit and credit) columns; choose amount sign,
 delimiter, and number format; optionally map transaction status; then standardize.
-The bank-format expander saves reusable local defaults for built-in or custom banks.
+Import defaults for built-in or custom banks come from read-only seed formats; the app
+never saves formats or mappings from the UI.
 
 Review: edit the transaction preview, search is case-insensitive and typo-tolerant,
 and hidden search results are still included in the export. The preview and download are
@@ -146,10 +211,11 @@ to Transfer; the app fills N/A and moves it to the excluded review list. Exclude
 payments, and declined transactions can be reviewed, and valid excluded transactions can
 be restored. Fix validation issues before downloading.
 
-Categories: known merchant rules and the local merchant cache are applied first.
-Unresolved merchants can be sent to the user-selected AI provider only when the user requests a
-suggestion. The merchant and category remain editable; only approval updates the
-preview and cache. The cache editor supports search, add, edit, delete, and save.
+Categories: known merchant rules and the read-only master merchant mapping are applied first.
+Unresolved transactions can be sent together to the user-selected AI provider with one request.
+Review each suggestion individually, edit its merchant and category, then apply the choice
+to that transaction. Changes stay in the current session and are never saved to the master
+merchant/category mapping; the user must download the CSV to keep their edits.
 
 Budgeting: choose a month, then enter income line by line under Income: Paychecks,
 Dividends, Refunds, CC Rewards, Other Income, and Savings / Other Withdrawals. The total
@@ -186,42 +252,3 @@ def ask_app_help(
     messages.append({"role": "user", "content": clean_question})
 
     return chat(settings, messages).strip()
-
-
-def save_merchant_cache(
-    cache: Mapping[str, str],
-    cache_path: str | Path | None = None,
-) -> None:
-    """Replace the local cache after validating editable keys and merchant names."""
-    cleaned = {}
-    for key, value in cache.items():
-        description_key = str(key).strip()
-        merchant = str(value).strip()
-        if not description_key or not merchant:
-            raise ValueError("Cache descriptions and merchant names cannot be blank.")
-        if description_key in cleaned:
-            raise ValueError(f"Duplicate cache description: {description_key}.")
-        cleaned[description_key] = merchant
-
-    path = Path(cache_path) if cache_path is not None else Path(__file__).with_name("merchant_cache.json")
-    path.write_text(json.dumps(cleaned, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
-
-
-def merge_merchant_cache_edits(
-    existing: Mapping[str, str],
-    replaced_keys: set[str],
-    edited_entries: list[tuple[str, str]],
-) -> dict[str, str]:
-    """Apply edits to visible cache keys while preserving every hidden entry."""
-    revised = {key: value for key, value in existing.items() if key not in replaced_keys}
-    for raw_key, raw_merchant in edited_entries:
-        key = clean_description_for_matching(raw_key)
-        merchant = raw_merchant.strip()
-        if not key and not merchant:
-            continue
-        if not key or not merchant:
-            raise ValueError("Each cache row needs both a description key and a merchant.")
-        if key in revised:
-            raise ValueError(f"The normalized description '{key}' appears more than once.")
-        revised[key] = merchant
-    return revised

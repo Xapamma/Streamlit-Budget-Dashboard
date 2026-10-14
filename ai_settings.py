@@ -1,4 +1,4 @@
-"""Sidebar UI for choosing an AI provider, model, and (session-only) API key."""
+﻿"""Sidebar UI for choosing an AI provider, model, and (session-only) API key."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import streamlit as st
 from ai_providers import PROVIDERS, AIError, AISettings, chat, validate_settings
 
 PROVIDER_KEY = "ai_provider"
+SETTINGS_KEY = "ai_settings_ready"
 
 
 def _clear_key(provider: str) -> None:

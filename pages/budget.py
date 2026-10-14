@@ -248,9 +248,43 @@ for main_category in budget_main_categories:
                         st.session_state.budget_editor_revision += 1
                         st.rerun()
 
+            # Auto "Other" subcategory: whenever the main-category limit exceeds the combined
+            # subcategory limits, surface the difference as a read-only "Other" row.
+            subcategory_limits = current_subcategory_limits(main_category)
+            auto_parent = float(st.session_state.monthly_budgets.get(main_category, 0.0))
+            auto_subtotal = sum(subcategory_limits.values())
+            other_value = round(auto_parent - auto_subtotal, 2)
+            if main_category != "Income" and other_value > 0:
+                other_columns = st.columns([5, 1])
+                with other_columns[0]:
+                    st.number_input(
+                        f"Monthly limit ($) · Other",
+                        min_value=0.0,
+                        value=other_value,
+                        step=25.0,
+                        format="%.2f",
+                        disabled=True,
+                        key=(
+                            f"budget_other_"
+                            f"{st.session_state.budget_editor_revision}"
+                            f"_{main_category}"
+                        ),
+                    )
+                with other_columns[1]:
+                    st.caption("Auto")
+                st.caption(
+                    "'Other' automatically covers the difference between the main-category "
+                    "limit and the combined subcategory limits."
+                )
+
     subcategory_limits = current_subcategory_limits(main_category)
-    subcategory_limits_by_main[main_category] = subcategory_limits
     subcategory_total = sum(subcategory_limits.values())
+    parent_limit = float(st.session_state.monthly_budgets.get(main_category, 0.0))
+    other_difference = round(parent_limit - subcategory_total, 2)
+    if main_category != "Income" and other_difference > 0:
+        subcategory_limits["Other"] = other_difference
+        subcategory_total = parent_limit
+    subcategory_limits_by_main[main_category] = subcategory_limits
     if main_category == "Income":
         monthly_income = subcategory_total
         st.session_state.monthly_income = monthly_income or None
@@ -262,7 +296,6 @@ for main_category in budget_main_categories:
         st.metric("Total monthly income", f"${monthly_income:,.2f}")
         continue
 
-    parent_limit = float(st.session_state.monthly_budgets.get(main_category, 0.0))
     effective_limit = max(parent_limit, subcategory_total)
     actual_spending = spending_for_budget_category(month_transactions, main_category)
     if (

@@ -5,15 +5,13 @@ from __future__ import annotations
 import pandas as pd
 
 from cleaning_logic import category_hierarchy, clean_description_for_matching
-from merchant_assistance import approve_merchant_match
 from final_export import (
     CATEGORY_LABEL_TO_PAIR,
     CATEGORY_PAIR_TO_LABEL,
     CATEGORY_SUBCATEGORIES,
-    approve_transaction_category,
 )
 
-CATEGORY_EDIT_API_VERSION = 3
+CATEGORY_EDIT_API_VERSION = 4
 ANALYTICS_COLUMNS = [
     "date",
     "description",
@@ -22,7 +20,6 @@ ANALYTICS_COLUMNS = [
     "main_category",
     "sub_category",
 ]
-CATEGORY_EDIT_API_VERSION = 3
 
 
 def sort_rows_by_date(rows: pd.DataFrame) -> pd.DataFrame:
@@ -70,11 +67,12 @@ def category_editor_data(
 def apply_transaction_category_edits(
     export_rows: pd.DataFrame,
     edited_rows: pd.DataFrame,
-    *,
-    persist_category_mappings: bool = False,
-    persist_merchant_mappings: bool = False,
 ) -> tuple[pd.DataFrame, bool, bool]:
-    """Apply category and optional merchant edits by source position."""
+    """Apply category and optional merchant edits by source position.
+
+    Changes update the session's editable transactions only; the master
+    merchant/category mapping is never written from this function.
+    """
     pairs = edited_rows["sub_category"].map(CATEGORY_LABEL_TO_PAIR)
     positions = pd.to_numeric(edited_rows["_source_position"], errors="coerce")
     invalid_positions = positions.isna() | (positions < 0) | (positions >= len(export_rows))
@@ -134,20 +132,6 @@ def apply_transaction_category_edits(
                 updated.loc[matching_rows, "_category_reviewed"] = main_category != "General Spending"
         if merchant_changed:
             updated.loc[matching_rows, "merchant"] = edited_merchant
-            if persist_merchant_mappings and normalized_description:
-                approve_merchant_match(description, edited_merchant)
-        reviewed = (
-            bool(updated.at[position, "_category_reviewed"])
-            if "_category_reviewed" in updated.columns
-            else main_category != "General Spending"
-        )
-        if (
-            persist_category_mappings
-            and normalized_description
-            and main_category != "Transfer"
-            and (main_category != "General Spending" or reviewed)
-        ):
-            approve_transaction_category(description, main_category, subcategory)
         changed = True
     return updated, changed, False
 

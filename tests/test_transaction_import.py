@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pandas as pd
 from streamlit.testing.v1 import AppTest
 
-from cleaning_logic import add_categories, category_hierarchy
+from cleaning_logic import add_categories, category_hierarchy, clean_description_for_matching
 from transaction_import import (
     ImportFormatError,
     STANDARD_COLUMNS,
@@ -22,7 +22,6 @@ from final_export import (
     CATEGORY_PAIR_OPTIONS,
     FINAL_EXPORT_COLUMNS,
     FINAL_MAIN_CATEGORY_OPTIONS,
-    approve_transaction_category,
     complete_missing_categories,
     format_final_export,
     get_final_export_row_issues,
@@ -37,14 +36,12 @@ from final_export import (
     validate_final_export_rows,
 )
 from merchant_assistance import (
-    approve_merchant_match,
     ask_app_help,
     load_merchant_cache,
-    merge_merchant_cache_edits,
-    save_merchant_cache,
     suggest_merchant_and_category,
+    suggest_merchant_categories_batch,
 )
-from bank_profiles import load_bank_profiles, save_bank_profile
+from bank_profiles import load_bank_profiles
 from fuzzy_search import fuzzy_match_indices
 from dashboard_data import (
     apply_transaction_category_edits,
@@ -199,46 +196,50 @@ class LoadTransactionsTests(unittest.TestCase):
         self.assertNotEqual(original, changed_mapping)
         self.assertNotEqual(original, changed_number_format)
 
-    def test_approved_merchant_is_saved_and_no_longer_needs_ai_review(self):
+    def test_seed_merchant_cache_marks_merchant_as_known(self):
         cache_path = self.temp_path / "merchant_cache.json"
         description = "ACME MARKET 1234"
         merchant = "Acme Market"
+        cache_path.write_text(
+            json.dumps({"acme market 1234": merchant}),
+            encoding="utf-8",
+        )
 
-        cache_key = approve_merchant_match(description, merchant, cache_path=cache_path)
-
-        import json
-        cache = json.loads(cache_path.read_text(encoding="utf-8"))
-        self.assertEqual(cache[cache_key], merchant)
+        cache = load_merchant_cache(cache_path)
+        self.assertEqual(cache, {"acme market 1234": merchant})
         self.assertFalse(merchant_needs_review(description, merchant, cache))
 
-    def test_cache_manager_updates_and_deletes_entries(self):
+    def test_merchant_cache_loads_seed_file_and_ignores_missing_file(self):
         cache_path = self.temp_path / "merchant_cache.json"
-        save_merchant_cache({"coffee shop": "Coffee Shop", "old store": "Old Store"}, cache_path)
-        save_merchant_cache({"coffee shop": "New Coffee Name"}, cache_path)
+        cache_path.write_text(
+            json.dumps({"coffee shop": "Coffee Shop", "old store": "Old Store"}),
+            encoding="utf-8",
+        )
 
-        self.assertEqual(load_merchant_cache(cache_path), {"coffee shop": "New Coffee Name"})
+        self.assertEqual(
+            load_merchant_cache(cache_path),
+            {"coffee shop": "Coffee Shop", "old store": "Old Store"},
+        )
+        self.assertEqual(load_merchant_cache(self.temp_path / "missing.json"), {})
 
-    def test_cache_manager_rejects_blank_entries(self):
-        with self.assertRaisesRegex(ValueError, "cannot be blank"):
-            save_merchant_cache({"  ": "Merchant"}, self.temp_path / "merchant_cache.json")
-
-    def test_bank_profile_is_saved_and_updated(self):
+    def test_bank_profiles_load_from_seed_file(self):
         profile_path = self.temp_path / "bank_profiles.json"
-        initial_profile = {
-            "delimiter": "Semicolon (;)",
-            "mapping": {"date": "Activity Date", "amount": "Net"},
-        }
-
-        save_bank_profile("New Bank", initial_profile, profile_path)
-        save_bank_profile(
-            "New Bank",
-            {**initial_profile, "mapping": {"date": "Date", "amount": "Amount"}},
-            profile_path,
+        profile_path.write_text(
+            json.dumps(
+                {
+                    "New Bank": {
+                        "delimiter": "Semicolon (;)",
+                        "mapping": {"date": "Date", "amount": "Amount"},
+                    }
+                }
+            ),
+            encoding="utf-8",
         )
 
         profiles = load_bank_profiles(profile_path)
         self.assertEqual(profiles["New Bank"]["mapping"], {"date": "Date", "amount": "Amount"})
         self.assertEqual(profiles["New Bank"]["delimiter"], "Semicolon (;)")
+        self.assertEqual(load_bank_profiles(self.temp_path / "missing.json"), {})
 
     def test_fuzzy_search_ignores_case_and_finds_typos(self):
         values = ["Coffee Place", "KRAZY Plant Shop 34987"]
@@ -246,19 +247,6 @@ class LoadTransactionsTests(unittest.TestCase):
         self.assertEqual(fuzzy_match_indices("krazy plnt", values), [1])
         self.assertEqual(fuzzy_match_indices("COFFEE", values), [0])
         self.assertEqual(fuzzy_match_indices("", values), [0, 1])
-
-    def test_cache_search_edits_preserve_hidden_entries(self):
-        current_cache = {"coffee shop": "Coffee Shop", "electric bill": "Power Utility"}
-
-        revised = merge_merchant_cache_edits(
-            current_cache,
-            {"coffee shop"},
-            [("coffee shop", "New Coffee Name")],
-        )
-        deleted = merge_merchant_cache_edits(current_cache, {"coffee shop"}, [])
-
-        self.assertEqual(revised, {"electric bill": "Power Utility", "coffee shop": "New Coffee Name"})
-        self.assertEqual(deleted, {"electric bill": "Power Utility"})
 
     def _suggestion_payload(self, **overrides):
         return {
@@ -316,6 +304,91 @@ class LoadTransactionsTests(unittest.TestCase):
             with self.assertRaises(AIError):
                 suggest_merchant_and_category("X", -1.0, {"A": ["B"]}, settings=None)
         self.assertEqual(mock_chat.call_count, 1)
+
+    def test_ai_batch_suggestions_use_one_request_and_preserve_transaction_ids(self):
+        transactions = [
+            {"id": "4", "description": "MARKET 123", "amount": -19.0},
+            {"id": "9", "description": "PAYROLL", "amount": 1200.0},
+        ]
+        payload = {
+            "suggestions": [
+                {
+                    "id": "4",
+                    "merchant": "Market",
+                    "main_category": "Shopping & Supplies",
+                    "sub_category": "General Retail",
+                },
+                {
+                    "id": "9",
+                    "merchant": "Employer",
+                    "main_category": "Income",
+                    "sub_category": "Paychecks",
+                },
+            ]
+        }
+        categories = {
+            "Shopping & Supplies": ["General Retail"],
+            "Income": ["Paychecks"],
+        }
+        with patch("merchant_assistance.chat_json", return_value=payload) as mock_chat:
+            suggestions = suggest_merchant_categories_batch(
+                transactions, categories, settings=None
+            )
+
+        self.assertEqual(mock_chat.call_count, 1)
+        self.assertEqual(suggestions["4"]["merchant"], "Market")
+        self.assertEqual(suggestions["9"]["sub_category"], "Paychecks")
+        self.assertIn("MARKET 123", mock_chat.call_args.args[1])
+        self.assertIn("PAYROLL", mock_chat.call_args.args[1])
+
+    def test_ai_batch_suggestions_reject_incomplete_or_invalid_responses(self):
+        transactions = [
+            {"id": "4", "description": "MARKET 123", "amount": -19.0},
+            {"id": "9", "description": "PAYROLL", "amount": 1200.0},
+        ]
+        categories = {"Shopping & Supplies": ["General Retail"]}
+        with patch(
+            "merchant_assistance.chat_json",
+            return_value={
+                "suggestions": [
+                    {
+                        "id": "4",
+                        "merchant": "Market",
+                        "main_category": "Shopping & Supplies",
+                        "sub_category": "General Retail",
+                    }
+                ]
+            },
+        ) as mock_chat:
+            with self.assertRaisesRegex(ValueError, "every transaction"):
+                suggest_merchant_categories_batch(
+                    transactions, categories, settings=None
+                )
+        self.assertEqual(mock_chat.call_count, 1)
+
+        with patch(
+            "merchant_assistance.chat_json",
+            return_value={
+                "suggestions": [
+                    {
+                        "id": "4",
+                        "merchant": "Market",
+                        "main_category": "Shopping & Supplies",
+                        "sub_category": "Not allowed",
+                    },
+                    {
+                        "id": "9",
+                        "merchant": "Employer",
+                        "main_category": "Shopping & Supplies",
+                        "sub_category": "General Retail",
+                    },
+                ]
+            },
+        ):
+            with self.assertRaisesRegex(ValueError, "outside the allowed choices"):
+                suggest_merchant_categories_batch(
+                    transactions, categories, settings=None
+                )
 
     def test_app_help_chat_uses_only_bounded_help_history(self):
         history = [
@@ -457,14 +530,10 @@ class LoadTransactionsTests(unittest.TestCase):
         edited_rows.loc[edited_rows.index[0], "sub_category"] = "Education :: Books"
         edited_rows.loc[edited_rows.index[0], "merchant"] = "Market Place Grocers"
 
-        with patch("dashboard_data.approve_transaction_category") as save_category_mapping:
-            with patch("dashboard_data.approve_merchant_match") as save_merchant_mapping:
-                updated_rows, changed, mismatch = apply_transaction_category_edits(
-                    export_rows,
-                    edited_rows,
-                    persist_category_mappings=True,
-                    persist_merchant_mappings=True,
-                )
+        updated_rows, changed, mismatch = apply_transaction_category_edits(
+            export_rows,
+            edited_rows,
+        )
 
         self.assertTrue(changed)
         self.assertFalse(mismatch)
@@ -476,17 +545,20 @@ class LoadTransactionsTests(unittest.TestCase):
         self.assertEqual(updated_rows.loc[2, "sub_category"], "Books")
         self.assertEqual(updated_rows.loc[2, "merchant"], "Market Place Grocers")
         self.assertTrue(updated_rows.loc[1, "_category_reviewed"])
-        save_category_mapping.assert_called_once_with("Market", "Education", "Books")
-        save_merchant_mapping.assert_called_once_with("Market", "Market Place Grocers")
 
     def test_approved_category_is_reused_for_repeated_description_imports(self):
         category_cache_path = self.temp_path / "category_cache.json"
         description = "ACME MARKET 1234 PURCHASE"
-        approve_transaction_category(
-            description,
-            "Shopping & Supplies",
-            "General Retail",
-            cache_path=category_cache_path,
+        category_cache_path.write_text(
+            json.dumps(
+                {
+                    clean_description_for_matching(description): {
+                        "main_category": "Shopping & Supplies",
+                        "sub_category": "General Retail",
+                    }
+                }
+            ),
+            encoding="utf-8",
         )
         transactions = pd.DataFrame(
             [{
@@ -603,6 +675,97 @@ class LoadTransactionsTests(unittest.TestCase):
         self.assertTrue(download_button.proto.disabled)
         self.assertFalse(app.session_state.editable_transactions.loc[0, "_category_reviewed"])
 
+    def test_app_batches_ai_suggestions_and_applies_manual_category_per_transaction(self):
+        standardized = pd.DataFrame(
+            [{
+                "transaction_id": "unknown-1",
+                "date": "03/10/2026",
+                "posted_date": "03/10/2026",
+                "description": "Unrecognized merchant purchase",
+                "amount": -45.0,
+                "transaction_type": "debit",
+                "bank_category": "",
+                "status": "",
+                "bank": "sofi",
+                "account": "checking",
+                "currency": "USD",
+                "source_file": "a.csv",
+                "source_row": 2,
+            }],
+            columns=STANDARD_COLUMNS,
+        )
+        editable = pd.DataFrame(
+            [["03/10/2026", "Unrecognized merchant purchase",
+              "Unrecognized Merchant Purchase", "debit", -45.0, "General Spending",
+              "Other", "sofi", "checking", "a.csv", 2, False]],
+            columns=FINAL_EXPORT_COLUMNS + [
+                "_source_file", "_source_row", "_category_reviewed"
+            ],
+        )
+        app = AppTest.from_file("../dashboard.py")
+        app.session_state["standardized_transactions"] = standardized
+        app.session_state["editable_transactions"] = editable
+        app.session_state["file_import_signatures"] = {"a.csv": "signature"}
+        app.switch_page("app.py").run()
+        self.assertFalse(app.exception)
+
+        batch_button = next(
+            button
+            for button in app.get("button")
+            if button.label == "Suggest categories for all 1 with AI"
+        )
+        response = {
+            "suggestions": [{
+                "id": "0",
+                "merchant": "Suggested Shop",
+                "main_category": "Shopping & Supplies",
+                "sub_category": "General Retail",
+            }]
+        }
+        with patch("merchant_assistance.chat_json", return_value=response) as mock_chat:
+            batch_button.click().run()
+
+        self.assertFalse(app.exception)
+        mock_chat.assert_called_once()
+        main_category = next(
+            selectbox
+            for selectbox in app.get("selectbox")
+            if selectbox.label == "Main category"
+        )
+        self.assertEqual(main_category.value, "Shopping & Supplies")
+        merchant_input = next(
+            text_input
+            for text_input in app.get("text_input")
+            if text_input.key.startswith("review_merchant_")
+        )
+        self.assertEqual(merchant_input.value, "Suggested Shop")
+
+        main_category.set_value("Education").run()
+        subcategory = next(
+            selectbox
+            for selectbox in app.get("selectbox")
+            if selectbox.label == "Sub-category"
+        )
+        subcategory.set_value("Books").run()
+        merchant_input = next(
+            text_input
+            for text_input in app.get("text_input")
+            if text_input.key.startswith("review_merchant_")
+        )
+        merchant_input.set_value("Manual Shop").run()
+        apply_button = next(
+            button
+            for button in app.get("button")
+            if button.label == "Approve for this one only"
+        )
+        apply_button.click().run()
+
+        self.assertFalse(app.exception)
+        self.assertEqual(app.session_state.editable_transactions.loc[0, "merchant"], "Manual Shop")
+        self.assertEqual(app.session_state.editable_transactions.loc[0, "main_category"], "Education")
+        self.assertEqual(app.session_state.editable_transactions.loc[0, "sub_category"], "Books")
+        self.assertTrue(app.session_state.editable_transactions.loc[0, "_category_reviewed"])
+
     def test_budget_auto_adjusts_main_cap_and_can_allocate_remainder_to_savings(self):
         transactions = pd.DataFrame(
             [
@@ -642,6 +805,61 @@ class LoadTransactionsTests(unittest.TestCase):
             next(metric.value for metric in app.metric if metric.label == "Income unallocated"),
             "$0.00",
         )
+
+    def test_budget_auto_creates_other_subcategory_for_main_excess(self):
+        transactions = pd.DataFrame(
+            [
+                ["09/15/2026", "Market", "Market", "debit", -125.0, "Food & Dining", "Groceries", "sofi", "checking", "a.csv", 2],
+                ["09/15/2026", "Payroll", "Employer", "credit", 500.0, "Income", "Paychecks", "sofi", "checking", "a.csv", 3],
+            ],
+            columns=FINAL_EXPORT_COLUMNS + ["_source_file", "_source_row"],
+        )
+        app = AppTest.from_file("../dashboard.py")
+        app.session_state["editable_transactions"] = transactions
+        app.session_state["monthly_income"] = 500.0
+        app.session_state["monthly_budgets"] = {
+            "Food & Dining": 1000.0,
+            "Food & Dining :: Groceries": 300.0,
+            "Food & Dining :: Fast Food": 400.0,
+        }
+        app.session_state["budget_month"] = date(2026, 9, 1)
+        app.switch_page("pages/budget.py").run()
+
+        self.assertFalse(app.exception, app.exception)
+        # The explicit main-category limit is preserved because the subcategory plan fits inside it.
+        self.assertEqual(app.session_state.monthly_budgets["Food & Dining"], 1000.0)
+        # The leftover amount surfaces as an auto-populated "Other" subcategory.
+        other_inputs = [
+            number_input
+            for number_input in app.number_input
+            if number_input.label == "Monthly limit ($) · Other"
+        ]
+        self.assertEqual(len(other_inputs), 1)
+        self.assertAlmostEqual(other_inputs[0].value, 300.0)
+        self.assertTrue(
+            any(
+                expander.label.startswith("Other · $0.00 spent of $300.00")
+                for expander in app.expander
+            )
+        )
+
+        # Raising a real subcategory to cover the parent removes the auto "Other" row.
+        fast_food = next(
+            number_input
+            for number_input in app.number_input
+            if number_input.label == "Monthly limit ($) · Fast Food"
+        )
+        fast_food.set_value(700.0)
+        app.run()
+
+        self.assertFalse(app.exception, app.exception)
+        self.assertFalse(
+            any(
+                number_input.label == "Monthly limit ($) · Other"
+                for number_input in app.number_input
+            )
+        )
+        self.assertEqual(app.session_state.monthly_budgets["Food & Dining"], 1000.0)
 
     def test_selected_month_transactions_seed_missing_budget_targets(self):
         transactions = pd.DataFrame(
@@ -794,7 +1012,7 @@ class LoadTransactionsTests(unittest.TestCase):
         self.assertEqual(result["status"].tolist(), ["Posted", "Posted"])
         self.assertEqual(result["source_row"].tolist(), [2, 3])
         self.assertEqual(result.attrs["declined_rows_dropped"], 1)
-        declined = result.attrs["declined_transactions"]
+        declined = result._declined_transactions
         self.assertEqual(declined["status"].tolist(), ["Declined"])
         self.assertTrue(pd.isna(declined["date"].iloc[0]))
         self.assertTrue(pd.isna(declined["amount"].iloc[0]))
@@ -826,6 +1044,42 @@ class LoadTransactionsTests(unittest.TestCase):
         self.assertTrue(imported.empty)
         self.assertTrue(exported.empty)
         self.assertEqual(imported.attrs["declined_rows_dropped"], 1)
+
+    def test_declined_rows_are_not_stored_inside_attrs(self):
+        path = self.write_csv(
+            "declined_attrs.csv",
+            "Date,Details,Amount,Status\n"
+            "2026-06-01,Coffee,-4.50,Posted\n"
+            "not-a-date,Bad row,not-a-number,Declined\n",
+        )
+        mapping = {"date": "Date", "description": "Details", "amount": "Amount", "status": "Status"}
+
+        result = load_transactions(path, bank="New Bank", column_mapping=mapping)
+
+        self.assertEqual(result.attrs["declined_rows_dropped"], 1)
+        self.assertEqual(list(result.attrs), ["declined_rows_dropped"])
+        declined = result._declined_transactions
+        self.assertEqual(len(declined), 1)
+        self.assertEqual(declined["status"].tolist(), ["Declined"])
+
+    def test_standardized_frames_concat_without_ambiguous_attrs_error(self):
+        # Regression: pandas 3.x pd.concat compares each frame's attrs dict for
+        # equality; storing a DataFrame inside attrs made that comparison raise
+        # "The truth value of a DataFrame is ambiguous".
+        path = self.write_csv(
+            "concat_declined.csv",
+            "Date,Details,Amount,Status\n"
+            "2026-06-01,Coffee,-4.50,Posted\n"
+            "not-a-date,Bad row,not-a-number,Declined\n",
+        )
+        mapping = {"date": "Date", "description": "Details", "amount": "Amount", "status": "Status"}
+
+        result = load_transactions(path, bank="New Bank", column_mapping=mapping)
+        first = result.loc[result["date"].notna()].copy()
+        second = result.loc[result["date"].notna()].copy()
+        combined = pd.concat([first, second], ignore_index=True)
+
+        self.assertEqual(len(combined), 2)
 
     def test_valid_dropped_row_can_be_converted_back_for_restore(self):
         dropped = pd.DataFrame(
@@ -906,6 +1160,26 @@ class LoadTransactionsTests(unittest.TestCase):
 
         self.assertEqual(result["description"].tolist(), ["Coffee Shop"])
         self.assertEqual(result["date"].tolist(), ["06/03/2026"])
+
+    def test_add_categories_handles_missing_description_without_raising(self):
+        transactions = pd.DataFrame(
+            {
+                "date": [pd.Timestamp("2026-06-01")],
+                "description": [None],
+                "amount": [-24.5],
+                "transaction_type": ["debit"],
+                "bank": ["SoFi"],
+                "account": ["checking"],
+            }
+        )
+
+        result = format_final_export(
+            transactions,
+            merchant_cache_path=self.temp_path / "missing.json",
+        )
+
+        self.assertEqual(result.columns.tolist(), FINAL_EXPORT_COLUMNS)
+        self.assertEqual(len(result), 1)
 
     def test_payment_rules_report_reasons_and_preserve_known_merchant(self):
         transactions = pd.DataFrame(

@@ -448,7 +448,17 @@ def load_transactions(
 
     result = result[STANDARD_COLUMNS].reset_index(drop=True)
     result.attrs["declined_rows_dropped"] = int(declined_rows.sum())
-    result.attrs["declined_transactions"] = declined_review[STANDARD_COLUMNS].reset_index(drop=True)
+    # Keep `.attrs` limited to simple scalars. pandas 3.x compares frames' attrs dicts
+    # during `pd.concat` finalization, and storing a DataFrame value there makes that
+    # comparison raise "The truth value of a DataFrame is ambiguous" on any downstream
+    # concat. The declined rows are exposed through a plain attribute instead; it
+    # survives in-place edits to the returned frame (e.g. app.py adding source_file)
+    # and is read immediately by the app before any copy/concat of the frame.
+    object.__setattr__(
+        result,
+        "_declined_transactions",
+        declined_review[STANDARD_COLUMNS].reset_index(drop=True),
+    )
     return result
 
 

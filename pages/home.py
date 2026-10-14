@@ -16,7 +16,7 @@ st.markdown(
 )
 
 st.page_link(
-    st.session_state["budget_dashboard_pages"]["process"],
+    "app.py",
     label="Process bank statements",
     icon=":material/upload_file:",
 )
@@ -25,4 +25,8 @@ st.info(
     "Imported transactions and budget targets are kept in your current Streamlit session. "
     "They are cleared when that session ends; download your categorized transactions to keep a copy."
 )
-st.caption("AI merchant suggestions (bring your own provider key) are optional. Categorization rules, review, analytics, and budgeting work without AI.")
+st.caption(
+    "Merchant and category defaults come from the read-only master mapping provided with the app, so edits "
+    "in the session never change that mapping. AI merchant suggestions (bring your own provider key) are "
+    "optional; categorization rules, review, analytics, and budgeting work without AI."
+)

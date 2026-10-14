@@ -308,7 +308,10 @@ sub_to_main = {sub: main for main, subs in category_hierarchy.items() for sub in
 # Makes a smart title
 def smart_title(text):
 
-    words = text.lower().split()
+    if text is None or (isinstance(text, str) and not text.strip()):
+        return ""
+
+    words = str(text).lower().split()
     fixed = []
 
     for w in words:
@@ -377,11 +380,18 @@ def add_categories(df):
         else:
             main = "Income"
             sub = "Other Income"
-        
+
         if description is None:
-            return pd.Series([None, None, None])
-            
-        return pd.Series([main, sub])
+            main = None
+            sub = None
+
+        # Always return exactly two values labeled like the target columns so the
+        # apply-result aligns by name on every pandas version instead of relying on
+        # positional luck or raising a column-count ValueError.
+        return pd.Series(
+            [main, sub],
+            index=["main_category", "sub_category"],
+        )
 
     # Apply across rows
     df[['main_category', 'sub_category']] = df.apply(process_row, axis=1)
