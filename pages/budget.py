@@ -412,7 +412,7 @@ if category_allocations:
                         )
                         st.dataframe(
                             transaction_details,
-                            use_container_width=True,
+                            width='stretch',
                             hide_index=True,
                         )
         if remaining < 0 and not is_income:

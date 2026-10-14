@@ -1,7 +1,7 @@
 # Streamlit Budget Dashboard — AI Agent Context
 
 ## Project Identity
-A multipage **Streamlit** app for normalizing bank-statement CSVs, categorizing transactions, providing analytics/budgeting, and optionally using AI for merchant suggestions. Python ≥ 3.13. Package manager: `uv`.
+A multipage **Streamlit** app for normalizing bank-statement CSVs, categorizing transactions, providing analytics/budgeting, and allowing manual review of merchants and categories with automatic persistence of reviewed mappings. Python ≥ 3.13. Package manager: `uv`.
 
 ## Quick Commands
 ```bash
@@ -22,14 +22,12 @@ uv run python -m unittest discover tests  # Run all tests
 
 ### Data Pipeline Modules
 - **`transaction_import.py`** — CSV → standardized 13-col DataFrame. `_ADAPTERS` dict for known banks. `load_transactions()` handles delimiters, column mapping, amount parsing, sign reversal, number formats, date parsing, declined rows.
-- **`final_export.py`** — Standardized → categorized 9-col export. Merchant resolution (rules → read-only master merchant mapping → fallback). Category resolution (rules → read-only master category mapping → user edits). Exclusion logic. Composite label system (`CATEGORY_LABEL_TO_PAIR`/`CATEGORY_PAIR_TO_LABEL`).
+- **`final_export.py`** — Standardized → categorized 9-col export. Merchant resolution (rules → persistent merchant mapping → fallback). Category resolution (rules → persistent category mapping → user edits). Map persistence (`save_approved_mappings()`). Exclusion logic. Composite label system (`CATEGORY_LABEL_TO_PAIR`/`CATEGORY_PAIR_TO_LABEL`).
 - **`cleaning_logic.py`** — Deterministic rules. `description_map` (~90 regex→merchant patterns), `sub_category_map`, `category_hierarchy` (12 categories), `clean_description_for_matching()`.
 - **`dashboard_data.py`** — Financial calculations for overview/analytics/budget pages.
 
-### AI Modules
-- **`ai_providers.py`** — 4 providers (gemini, openrouter, ollama_cloud, ollama_local). `AISettings` dataclass (key in memory only). `chat()`/`chat_json()`. `_redact()` filters keys from errors.
-- **`ai_settings.py`** — Sidebar UI. `render_ai_settings()` returns `AISettings` or `None`.
-- **`merchant_assistance.py`** — `suggest_merchant_and_category()` (up to 5 retries), `suggest_merchant_categories_batch()`, `ask_app_help()`. Session-only; never writes the master mapping.
+### Removed AI Modules
+The AI suggestion files (`ai_providers.py`, `ai_settings.py`, `merchant_assistance.py`) were removed. Review is manual; see `final_export.save_approved_mappings()` for the persistence layer.
 
 ### Utility Modules
 - **`bank_profiles.py`** — Read-only bank CSV format seed storage.
@@ -37,12 +35,12 @@ uv run python -m unittest discover tests  # Run all tests
 - **`budget_export.py`** — `build_excel()` (OpenPyXL) and `build_pdf()` (ReportLab).
 
 ### Data Files
-Static seed data, loaded read-only each session (never written by the app):
+Static seed data, loaded read-only each session and written at runtime when mapping edits are applied:
 - **`bank_profiles.json`** — `{bank: {delimiter, amount_mode, ...}}`
 - **`category_cache.json`** — `{normalized_description: {main_category, sub_category}}`
 - **`merchant_cache.json`** — `{normalized_description: merchant_name}`
 
-`bank_profiles.json` is Git-ignored; `category_cache.json` and `merchant_cache.json` are tracked master mapping seeds.
+`bank_profiles.json` is Git-ignored; `category_cache.json` and `merchant_cache.json` are tracked mapping files.
 
 ## Critical Design Patterns
 
@@ -80,12 +78,7 @@ Always call `clean_description_for_matching()` from `cleaning_logic.py` before u
 - Editor: main_category="Transfer" → moved to excluded (sub_category="N/A")
 - Restore: `restored_rows_to_standardized()` → back to standardized pool
 
-### 8. AI Security
-- Keys in `st.session_state.ai_key_{provider}` only; never to disk/logs/errors.
-- `_redact()` strips keys from all error output.
-- `AISettings.__repr__` hides the key.
-- Privacy acknowledgment required before any API call.
-- Help chat (`ask_app_help()`) excludes all transaction data.
+### 8. Review Persistence
 
 ## Conventions
 - **Imports:** Standard library → third-party → local.
@@ -95,10 +88,7 @@ Always call `clean_description_for_matching()` from `cleaning_logic.py` before u
 
 ## Testing Patterns
 ```python
-# Mock network calls
-from unittest.mock import patch
-with patch("urllib.request.urlopen", return_value=FakeResponse(...)):
-    result = chat(...)
+
 
 # File I/O tests
 import tempfile
@@ -119,7 +109,7 @@ app.switch_page("pages/budget.py").run()
 | Add/modify bank adapter | `transaction_import.py` `_ADAPTERS` + `app.py` `BANK_OPTIONS` |
 | Add merchant rules | `cleaning_logic.py` `description_map`/`sub_category_map` |
 | Change category hierarchy | `cleaning_logic.py` `category_hierarchy` |
-| Add new AI provider | `ai_providers.py` `PROVIDERS` + `_DISPATCH` |
+| Save reviewed merchant/category mapping | `final_export.py` `save_approved_mappings()` |
 | Change export columns | `final_export.py` `FINAL_EXPORT_COLUMNS` + `transaction_import.py` `STANDARD_COLUMNS` |
 | Fix widget not updating | Check revision counter pattern |
 | Add new page | Create in `pages/`, register in `dashboard.py` |

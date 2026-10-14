@@ -67,7 +67,7 @@ edited_recent = st.data_editor(
     recent_editor_data,
     key=f"overview_recent_transactions_{st.session_state.overview_recent_editor_revision}",
     num_rows="fixed",
-    use_container_width=True,
+    width='stretch',
     hide_index=True,
     column_config={
         "date": st.column_config.TextColumn("Date", disabled=True),

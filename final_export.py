@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Mapping
@@ -168,6 +169,35 @@ def validate_final_export_rows(
     if problems:
         return result, " ".join(problems)
     return result.reset_index(drop=True), None
+
+
+def edited_row_problem(
+    merchant: object,
+    main_category: object,
+    sub_category: object,
+) -> str | None:
+    """Return a short problem label for an edited review-table row, or None if valid.
+
+    Mirrors the flag-table validation in app.py: the merchant must be non-blank,
+    and the sub-category must belong to the selected main category (Transfer uses N/A).
+    """
+    if pd.isna(merchant) or not str(merchant).strip():
+        return "missing merchant"
+    if main_category not in CATEGORY_SUBCATEGORIES or (
+        main_category != "Transfer"
+        and sub_category not in CATEGORY_SUBCATEGORIES[main_category]
+    ):
+        return "sub-category does not match its main category"
+    return None
+
+
+def format_edit_problem_counts(problem_counts: Mapping[str, int]) -> str:
+    """Condense per-row edit problems into one short summary sentence."""
+    parts = [f"{count} {label}" for label, count in problem_counts.items() if count]
+    if not parts:
+        return ""
+    total = sum(problem_counts.values())
+    return f"{total} row(s) need fixes before applying: {', '.join(parts)}."
 
 
 def get_final_export_row_issues(transactions: pd.DataFrame) -> dict[int, list[str]]:
@@ -414,6 +444,90 @@ def load_category_cache(cache_path: str | Path | None = None) -> dict[str, dict[
                 "sub_category": sub_category,
             }
     return approved
+
+
+def _atomic_write_json(path: Path, data: Mapping[str, object]) -> None:
+    """Write JSON safely by replacing the target only after a complete write."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(path.name + ".tmp")
+    with temp_path.open("w", encoding="utf-8") as temp_file:
+        json.dump(data, temp_file, indent=2, ensure_ascii=False)
+    os.replace(temp_path, path)
+
+
+def save_approved_mappings(
+    rows: pd.DataFrame,
+    *,
+    merchant_cache_path: str | Path | None = None,
+    category_cache_path: str | Path | None = None,
+) -> int:
+    """Persist reviewed merchant and category mappings so future imports reuse them.
+
+    Keys are normalized descriptions (see ``clean_description_for_matching``),
+    matching the lookup keys used by ``format_final_export``. Blank descriptions,
+    blank merchants, Transfer categories, and invalid category pairs are skipped.
+    Existing entries are preserved: reviewed rows are added or updated only.
+    Writes are atomic, so a failed write never corrupts the cache files.
+
+    Returns the number of mappings written (merchant + category entries).
+    """
+    if rows.empty:
+        return 0
+
+    merchant_path = (
+        Path(merchant_cache_path)
+        if merchant_cache_path is not None
+        else Path(__file__).with_name("merchant_cache.json")
+    )
+    category_path = (
+        Path(category_cache_path)
+        if category_cache_path is not None
+        else CATEGORY_CACHE_PATH
+    )
+
+    merchants: dict[str, str] = {}
+    categories: dict[str, dict[str, str]] = {}
+    for _, row in rows.iterrows():
+        description_value = row.get("description")
+        description = (
+            ""
+            if pd.isna(description_value)
+            else clean_description_for_matching(str(description_value))
+        )
+        if not description:
+            continue
+
+        merchant_value = row.get("merchant")
+        merchant = "" if pd.isna(merchant_value) else str(merchant_value).strip()
+        if merchant:
+            merchants[description] = merchant
+
+        main_category = row.get("main_category")
+        sub_category = row.get("sub_category")
+        main_category = "" if pd.isna(main_category) else str(main_category)
+        sub_category = "" if pd.isna(sub_category) else str(sub_category)
+        if (
+            main_category in CATEGORY_SUBCATEGORIES
+            and main_category != "Transfer"
+            and sub_category in CATEGORY_SUBCATEGORIES[main_category]
+        ):
+            categories[description] = {
+                "main_category": main_category,
+                "sub_category": sub_category,
+            }
+
+    saved = 0
+    if merchants:
+        existing_merchants = dict(load_merchant_cache(merchant_path))
+        existing_merchants.update(merchants)
+        _atomic_write_json(merchant_path, existing_merchants)
+        saved += len(merchants)
+    if categories:
+        existing_categories = dict(load_category_cache(category_path))
+        existing_categories.update(categories)
+        _atomic_write_json(category_path, existing_categories)
+        saved += len(categories)
+    return saved
 
 
 def _fuzzy_match(description: str, choices: list[str]) -> tuple[str | None, float]:

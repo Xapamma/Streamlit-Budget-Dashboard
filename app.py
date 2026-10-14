@@ -7,7 +7,6 @@ import hashlib
 import importlib
 import io
 import traceback
-from html import escape
 import tempfile
 from pathlib import Path
 
@@ -34,6 +33,8 @@ from final_export import (
     FINAL_EXPORT_COLUMNS,
     FINAL_MAIN_CATEGORY_OPTIONS,
     complete_missing_categories,
+    edited_row_problem,
+    format_edit_problem_counts,
     format_final_export,
     get_final_export_row_issues,
     load_category_cache,
@@ -49,12 +50,6 @@ from final_export import (
     validate_final_export_rows,
 )
 from cleaning_logic import clean_description_for_matching
-from ai_providers import AIError
-from ai_settings import render_ai_settings
-from merchant_assistance import (
-    ask_app_help,
-    suggest_merchant_categories_batch,
-)
 from fuzzy_search import fuzzy_match_indices
 from transaction_import import (
     ImportFormatError,
@@ -227,12 +222,12 @@ if "dropped_editor_revision" not in st.session_state:
     st.session_state.dropped_editor_revision = 0
 if "export_editor_revision" not in st.session_state:
     st.session_state.export_editor_revision = 0
-if "ai_review_expanded" not in st.session_state:
-    st.session_state.ai_review_expanded = False
-if "app_help_chat_messages" not in st.session_state:
-    st.session_state.app_help_chat_messages = []
-if "app_help_chat_expanded" not in st.session_state:
-    st.session_state.app_help_chat_expanded = False
+if "review_expanded" not in st.session_state:
+    st.session_state.review_expanded = False
+if "session_merchant_cache" not in st.session_state:
+    st.session_state.session_merchant_cache = {}
+if "session_category_cache" not in st.session_state:
+    st.session_state.session_category_cache = {}
 if "editable_transactions" not in st.session_state:
     current_transactions = st.session_state.standardized_transactions
     initial_export = (
@@ -242,7 +237,7 @@ if "editable_transactions" not in st.session_state:
     )
     initial_export["_source_file"] = ""
     initial_export["_source_row"] = pd.NA
-    approved_category_cache = load_category_cache()
+    approved_category_cache = {**load_category_cache(), **st.session_state.session_category_cache}
     initial_export["_category_reviewed"] = [
         main_category != "General Spending"
         or clean_description_for_matching(str(description)) in approved_category_cache
@@ -258,7 +253,7 @@ elif not set(EDITABLE_SOURCE_COLUMNS).issubset(st.session_state.editable_transac
     if "_source_row" not in st.session_state.editable_transactions.columns:
         st.session_state.editable_transactions["_source_row"] = pd.NA
     if "_category_reviewed" not in st.session_state.editable_transactions.columns:
-        approved_category_cache = load_category_cache()
+        approved_category_cache = {**load_category_cache(), **st.session_state.session_category_cache}
         st.session_state.editable_transactions["_category_reviewed"] = (
             st.session_state.editable_transactions.apply(
                 lambda row: row["main_category"] != "General Spending"
@@ -290,7 +285,7 @@ with st.sidebar:
     st.metric("Imported rows", len(current_data))
     if not current_data.empty:
         st.metric("Banks", current_data["bank"].nunique())
-    if st.button("Clear imported data", use_container_width=True):
+    if st.button("Clear imported data", width='stretch'):
         st.session_state.standardized_transactions = pd.DataFrame(columns=STANDARD_COLUMNS)
         st.session_state.editable_transactions = pd.DataFrame(columns=EDITABLE_COLUMNS)
         st.session_state.dropped_transactions = pd.DataFrame(columns=DROPPED_REVIEW_COLUMNS)
@@ -340,54 +335,7 @@ with st.sidebar:
                 st.session_state.pop("statement_to_remove", None)
                 st.rerun()
 
-    ai_settings = render_ai_settings()
-
-    with st.expander(
-        "Ask the app (AI help)",
-        expanded=st.session_state.app_help_chat_expanded,
-    ):
-        st.caption(
-            "Ask how to import, review, categorize, or export. This chat only sends your "
-            "question and recent chat messages to your selected AI provider (set up under "
-            "AI settings). Do not include financial details."
-        )
-        st.caption(
-            "The sidebar chat history is temporary and is cleared when this app session ends."
-        )
-
-        for chat_message in st.session_state.app_help_chat_messages[-12:]:
-            with st.chat_message(chat_message["role"]):
-                st.markdown(chat_message["content"])
-
-        with st.form("app_help_chat_form", clear_on_submit=True):
-            help_question = st.text_input(
-                "Ask a question",
-                placeholder="How do I save a bank format?",
-            )
-            ask_submitted = st.form_submit_button("Send question", use_container_width=True)
-
-        if ask_submitted:
-            question = help_question.strip()
-            if not question:
-                st.warning("Enter a question about using the app.")
-            else:
-                st.session_state.app_help_chat_expanded = True
-                messages = st.session_state.app_help_chat_messages
-                messages.append({"role": "user", "content": question})
-                try:
-                    with st.spinner("The AI is answering..."):
-                        answer = ask_app_help(
-                            question,
-                            messages[:-1],
-                            settings=ai_settings,
-                        )
-                except AIError as error:
-                    answer = str(error)
-                except Exception:
-                    answer = "The AI request failed unexpectedly. Check your AI settings and try again."
-                messages.append({"role": "assistant", "content": answer})
-                st.session_state.app_help_chat_messages = messages[-12:]
-                st.rerun()
+    
 
 if uploaded_files:
     st.subheader("1. Choose a statement")
@@ -462,7 +410,7 @@ if uploaded_files:
         st.stop()
 
     with st.expander("Preview the first rows", expanded=False):
-        st.dataframe(preview, use_container_width=True, hide_index=True)
+        st.dataframe(preview, width='stretch', hide_index=True)
 
     st.subheader("2. Identify the account")
     account_default = str(bank_profile.get("account", ""))
@@ -631,7 +579,7 @@ if uploaded_files:
         "Update this file's import" if replacing_existing else "Standardize and add statement",
         type="primary",
         disabled=already_current or duplicate_name,
-        use_container_width=True,
+        width='stretch',
     ):
         if not bank_name:
             st.error("Enter a bank name before importing this statement.")
@@ -692,7 +640,7 @@ if uploaded_files:
                 new_export["_category_reviewed"] = new_export["main_category"].ne(
                     "General Spending"
                 )
-                approved_category_cache = load_category_cache()
+                approved_category_cache = {**load_category_cache(), **st.session_state.session_category_cache}
                 if approved_category_cache:
                     cached_descriptions = new_export["description"].map(
                         lambda value: clean_description_for_matching(str(value))
@@ -787,9 +735,9 @@ if (
     st.subheader("4. Review, edit and download")
     st.info(
         "Before downloading, check dates, signs and amounts, and confirm merchants and categories. "
-        "Merchant names and categories can be changed in the table or with the optional AI tool below. "
-        "Edits apply to this session's transactions only and are never written to the master "
-        "merchant/category mapping. "
+        "Change merchants and categories directly in the table or in the review list below. "
+        "Reviewed merchant and category choices are saved as mappings, so matching descriptions "
+        "in future statements follow them automatically and skip the review list. "
         "Unmatched spending starts unchecked in Category reviewed; assign a category or explicitly "
         "check it to keep General Spending before downloading. "
         "Review transfers carefully: if a transfer was not caught by the rules, set its main category "
@@ -838,7 +786,7 @@ if (
         visible_editor_data,
         key=f"export_editor_{st.session_state.export_editor_revision}",
         num_rows="fixed" if search_query else "dynamic",
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
         column_config={
             "row_number": st.column_config.NumberColumn("Row", disabled=True, width="small"),
@@ -926,6 +874,44 @@ if (
         edited_source_metadata.loc[matching_rows, "_category_reviewed"] = True
         pair_mismatch.loc[matching_rows] = False
     edited_transactions = edited_transactions[FINAL_EXPORT_COLUMNS]
+
+    # Persist mappings the user actively changed in the main editor so future
+    # imports reuse them and matching descriptions leave the review queue.
+    change_rows = []
+    for row_position, row in edited_transactions.iterrows():
+        editor_row_number = editor_row_numbers.iloc[row_position]
+        if pd.isna(editor_row_number) or editor_row_number not in original_editor_data.index:
+            continue
+        original_row = original_editor_data.loc[editor_row_number]
+        merchant_changed = str(original_row["merchant"]) != str(row["merchant"])
+        current_label = CATEGORY_PAIR_TO_LABEL.get(
+            (str(row["main_category"]), str(row["sub_category"])), ""
+        )
+        category_changed = str(original_row["sub_category"]) != current_label
+        was_reviewed = (
+            False if pd.isna(original_row["_category_reviewed"])
+            else bool(original_row["_category_reviewed"])
+        )
+        is_reviewed = bool(edited_source_metadata.at[row_position, "_category_reviewed"])
+        if merchant_changed or category_changed or (is_reviewed and not was_reviewed):
+            change_rows.append(
+                {
+                    "description": row["description"],
+                    "merchant": row["merchant"],
+                    "main_category": row["main_category"],
+                    "sub_category": row["sub_category"],
+                }
+            )
+    if change_rows:
+        for change_row in change_rows:
+            cleaned_desc = clean_description_for_matching(str(change_row["description"]))
+            if cleaned_desc:
+                st.session_state.session_merchant_cache[cleaned_desc] = str(change_row["merchant"])
+                st.session_state.session_category_cache[cleaned_desc] = {
+                    "main_category": change_row["main_category"],
+                    "sub_category": change_row["sub_category"],
+                }
+
     edited_transactions = edited_transactions.reset_index(drop=True)
     if transfers_moved:
         transfer_rows = make_transfer_review_rows(
@@ -962,7 +948,7 @@ if (
         st.session_state.export_editor_revision += 1
         st.rerun()
 
-    merchant_cache = load_merchant_cache()
+    merchant_cache = {**load_merchant_cache(), **st.session_state.session_merchant_cache}
     candidate_rows = [
         index
         for index, row in st.session_state.editable_transactions.iterrows()
@@ -970,273 +956,141 @@ if (
         or merchant_needs_review(str(row["description"]), str(row["merchant"]), merchant_cache)
     ]
     with st.expander(
-        f"Needs category review and optional AI help · {len(candidate_rows)} unresolved",
-        expanded=st.session_state.ai_review_expanded,
+        f"Transactions needing review · {len(candidate_rows)} unresolved",
+        expanded=st.session_state.review_expanded,
     ):
         st.caption(
-            "Review each transaction individually. You can manually choose a category, or request "
-            "suggestions for every unresolved transaction in one AI call."
+            "Set the merchant and category for each transaction below. Mappings are stored "
+            "for this session only — they are not saved to disk and expire when you close "
+            "the browser."
         )
-        st.caption(
-            "When requested, your selected AI provider receives the unresolved descriptions and "
-            "amounts plus the allowed categories (configure it under AI settings in the sidebar). "
-            "Applying a suggestion only updates this session's transactions; the master "
-            "merchant/category mapping is never changed."
-        )
+
         if not candidate_rows:
             st.info("No unresolved transactions need review.")
         else:
-            candidate_fingerprint = hashlib.sha256(
-                "|".join(
-                    f"{index}|{row['description']}|{row['amount']}"
-                    for index, row in st.session_state.editable_transactions.loc[
-                        candidate_rows
-                    ].iterrows()
-                ).encode("utf-8")
-            ).hexdigest()[:12]
-            batch_key = f"ai_batch_suggestions_{candidate_fingerprint}"
-            batch_items = [
-                {
-                    "id": str(index),
-                    "description": str(row["description"]),
-                    "amount": float(row["amount"]),
-                }
-                for index, row in st.session_state.editable_transactions.loc[
-                    candidate_rows
-                ].iterrows()
+            # --- One-by-one flagged transaction review ---
+            if "flag_review_cursor" not in st.session_state:
+                st.session_state.flag_review_cursor = 0
+
+            cursor = st.session_state.flag_review_cursor
+            if cursor >= len(candidate_rows):
+                cursor = 0
+                st.session_state.flag_review_cursor = 0
+
+            current_idx = candidate_rows[cursor]
+            row = st.session_state.editable_transactions.loc[current_idx]
+
+            progress_text = f"Transaction {cursor + 1} of {len(candidate_rows)}"
+            st.progress((cursor + 1) / len(candidate_rows), text=progress_text)
+
+            # Exclude "General Spending" from the dropdown — it is a default fallback,
+            # not a legitimate category choice for the review flow.
+            review_main_options = [
+                c for c in FINAL_MAIN_CATEGORY_OPTIONS if c != "General Spending"
             ]
-            if st.button(
-                f"Suggest categories for all {len(candidate_rows)} with AI",
-                key=f"suggest_batch_{candidate_fingerprint}",
-            ):
-                st.session_state.ai_review_expanded = True
-                st.session_state.pop(batch_key, None)
-                try:
-                    with st.spinner(
-                        f"Asking the AI for suggestions for {len(batch_items)} transactions..."
-                    ):
-                        st.session_state[batch_key] = suggest_merchant_categories_batch(
-                            batch_items,
-                            CATEGORY_SUBCATEGORIES,
-                            settings=ai_settings,
-                        )
-                except AIError as error:
-                    st.error(str(error))
-                except ValueError as error:
-                    st.error(f"Could not use the AI suggestions: {error}")
 
-            batch_suggestions = st.session_state.get(batch_key, {})
-            if batch_suggestions:
-                suggested_rows = []
-                for transaction_index in candidate_rows:
-                    suggestion = batch_suggestions.get(str(transaction_index))
-                    if not suggestion:
-                        continue
-                    transaction = st.session_state.editable_transactions.loc[transaction_index]
-                    suggested_rows.append(
-                        {
-                            "Date": str(transaction["date"]),
-                            "Description": str(transaction["description"]),
-                            "Amount": float(transaction["amount"]),
-                            "Merchant": suggestion["merchant"],
-                            "Main category": suggestion["main_category"],
-                            "Sub-category": suggestion["sub_category"],
-                            "_row": transaction_index,
-                        }
+            with st.container(border=True):
+                if str(row["main_category"]) == "General Spending":
+                    st.warning(
+                        "This transaction is currently set to **General Spending**, "
+                        "the default fallback. Choose a real category below before applying."
                     )
-                if suggested_rows:
-                    st.markdown("**Review all suggestions**")
-                    st.caption(
-                        "Edit any suggestion, then apply them all at once. Rows are applied to "
-                        "this session's transactions only and never saved to the master mapping."
+                info_cols = st.columns([2, 2, 1, 1])
+                with info_cols[0]:
+                    st.markdown(f"**Description**  \n{row['description']}")
+                with info_cols[1]:
+                    st.markdown(
+                        f"**Merchant**  \n{row['merchant'] if pd.notna(row['merchant']) else ''}"
                     )
-                    suggestion_table = pd.DataFrame(suggested_rows)
-                    edited_suggestions = st.data_editor(
-                        suggestion_table,
-                        key=f"batch_review_editor_{candidate_fingerprint}",
-                        hide_index=True,
-                        use_container_width=True,
-                        disabled=["Date", "Description", "Amount"],
-                        column_order=[
-                            "Date",
-                            "Description",
-                            "Amount",
-                            "Merchant",
-                            "Main category",
-                            "Sub-category",
-                        ],
-                        column_config={
-                            "Main category": st.column_config.SelectboxColumn(
-                                "Main category", options=FINAL_MAIN_CATEGORY_OPTIONS, required=True
-                            ),
-                            "Sub-category": st.column_config.SelectboxColumn(
-                                "Sub-category",
-                                options=sorted(
-                                    {s for subs in CATEGORY_SUBCATEGORIES.values() for s in subs}
-                                ),
-                                required=True,
-                            ),
-                            "_row": None,
-                        },
-                    )
-                    if st.button(
-                        f"Apply all {len(edited_suggestions)} suggestions",
-                        type="primary",
-                        key=f"save_all_{candidate_fingerprint}",
-                    ):
-                        batch_errors = []
-                        for _, suggested in edited_suggestions.iterrows():
-                            merchant_value = str(suggested["Merchant"] or "").strip()
-                            main_value = suggested["Main category"]
-                            sub_value = suggested["Sub-category"]
-                            if not merchant_value:
-                                batch_errors.append(
-                                    f"Enter a merchant for: {suggested['Description']}"
-                                )
-                            elif main_value not in CATEGORY_SUBCATEGORIES or (
-                                main_value != "Transfer"
-                                and sub_value not in CATEGORY_SUBCATEGORIES[main_value]
-                            ):
-                                batch_errors.append(
-                                    f"Sub-category does not match {main_value} for: {suggested['Description']}"
-                                )
-                        if batch_errors:
-                            st.error("\n\n".join(batch_errors))
-                        else:
-                            updated = st.session_state.editable_transactions.copy()
-                            for _, suggested in edited_suggestions.iterrows():
-                                row_index = suggested["_row"]
-                                merchant_value = str(suggested["Merchant"]).strip()
-                                main_value = suggested["Main category"]
-                                sub_value = (
-                                    "N/A" if main_value == "Transfer" else suggested["Sub-category"]
-                                )
-                                updated.at[row_index, "merchant"] = merchant_value
-                                updated.at[row_index, "main_category"] = main_value
-                                updated.at[row_index, "sub_category"] = sub_value
-                                updated.at[row_index, "_category_reviewed"] = True
-                            st.session_state.editable_transactions = updated
-                            st.session_state.pop(batch_key, None)
-                            st.session_state.pop(
-                                f"export_editor_{st.session_state.export_editor_revision}",
-                                None,
-                            )
-                            st.session_state.export_editor_revision += 1
-                            st.session_state.ai_review_expanded = True
-                            st.rerun()
-            for transaction_index in candidate_rows:
-                transaction = st.session_state.editable_transactions.loc[transaction_index]
-                description = str(transaction["description"])
-                suggestion = batch_suggestions.get(str(transaction_index))
-                widget_context = (
-                    candidate_fingerprint
-                    if suggestion
-                    else str(st.session_state.export_editor_revision)
+                with info_cols[2]:
+                    st.markdown(f"**Date**  \n{row['date']}")
+                with info_cols[3]:
+                    st.markdown(f"**Amount**  \n{row['amount']}")
+
+                merchant_input = st.text_input(
+                    "Merchant",
+                    value=row['merchant'] if pd.notna(row['merchant']) else "",
+                    key=f"flag_merchant_{current_idx}",
                 )
-                transaction_fingerprint = hashlib.sha256(
-                    f"{transaction_index}|{description}|{widget_context}".encode("utf-8")
-                ).hexdigest()[:12]
-                with st.expander(
-                    f"{transaction['date']} | {transaction['merchant']} | {description}",
-                    expanded=False,
-                ):
-                    proposed_merchant = (
-                        suggestion["merchant"]
-                        if suggestion
-                        else str(transaction["merchant"])
-                    )
-                    edited_merchant = st.text_input(
-                        "Merchant",
-                        value=proposed_merchant,
-                        key=f"review_merchant_{transaction_fingerprint}",
-                    ).strip()
-                    proposed_main = (
-                        suggestion["main_category"]
-                        if suggestion
-                        else str(transaction["main_category"])
-                    )
-                    if proposed_main not in FINAL_MAIN_CATEGORY_OPTIONS:
-                        proposed_main = FINAL_MAIN_CATEGORY_OPTIONS[0]
-                    selected_main = st.selectbox(
+
+                cat_cols = st.columns(2)
+                with cat_cols[0]:
+                    main_category = st.selectbox(
                         "Main category",
-                        FINAL_MAIN_CATEGORY_OPTIONS,
-                        index=FINAL_MAIN_CATEGORY_OPTIONS.index(proposed_main),
-                        key=f"review_main_{transaction_fingerprint}",
+                        review_main_options,
+                        index=(
+                            review_main_options.index(row['main_category'])
+                            if row['main_category'] in review_main_options
+                            else 0
+                        ),
+                        key=f"flag_main_cat_{current_idx}",
                     )
-                    subcategory_options = CATEGORY_SUBCATEGORIES[selected_main]
-                    proposed_sub = (
-                        suggestion["sub_category"]
-                        if suggestion and selected_main == suggestion["main_category"]
-                        else str(transaction["sub_category"])
-                    )
-                    if proposed_sub not in subcategory_options:
-                        proposed_sub = subcategory_options[0]
-                    selected_sub = st.selectbox(
+                with cat_cols[1]:
+                    sub_options = sorted(CATEGORY_SUBCATEGORIES.get(main_category, []))
+                    sub_category = st.selectbox(
                         "Sub-category",
-                        subcategory_options,
-                        index=subcategory_options.index(proposed_sub),
-                        key=f"review_sub_{transaction_fingerprint}_{normalize_name(selected_main)}",
+                        sub_options,
+                        index=(
+                            sub_options.index(row['sub_category'])
+                            if row['sub_category'] in sub_options
+                            else 0
+                        ),
+                        key=f"flag_sub_cat_{current_idx}",
                     )
-                    if suggestion is None:
-                        st.caption("No AI suggestion yet. These controls can be used manually.")
 
-                    save_col, apply_col = st.columns(2)
-                    with save_col:
-                        save_choice = st.button(
-                            "Mark as transfer and exclude all similar"
-                            if selected_main == "Transfer"
-                            else "Approve for all matching descriptions",
-                            type="primary",
-                            help="Apply this merchant and category to every flagged transaction with the same description.",
-                            key=f"save_review_{transaction_fingerprint}",
-                        )
-                    with apply_col:
-                        apply_choice = st.button(
-                            "Approve for this one only",
-                            help="Apply this merchant and category to this single transaction.",
-                            key=f"apply_review_{transaction_fingerprint}",
-                        )
+            nav_cols = st.columns([1, 2, 1])
+            with nav_cols[0]:
+                if cursor > 0:
+                    if st.button("← Previous", key=f"flag_prev_{current_idx}"):
+                        st.session_state.flag_review_cursor = cursor - 1
+                        st.rerun()
 
-                    if save_choice or apply_choice:
-                        if not edited_merchant:
-                            st.error("Enter a merchant name before applying this review.")
-                        else:
-                            updated = st.session_state.editable_transactions.copy()
-                            if save_choice:
-                                # Apply to all candidate rows with the same cleaned description
-                                normalized_description = clean_description_for_matching(description)
-                                matching_transaction_indices = [
-                                    idx
-                                    for idx in candidate_rows
-                                    if clean_description_for_matching(
-                                        str(st.session_state.editable_transactions.at[idx, "description"])
-                                    ) == normalized_description
-                                ]
-                                for idx in matching_transaction_indices:
-                                    updated.at[idx, "merchant"] = edited_merchant
-                                    updated.at[idx, "main_category"] = selected_main
-                                    updated.at[idx, "sub_category"] = (
-                                        "N/A" if selected_main == "Transfer" else selected_sub
-                                    )
-                                    updated.at[idx, "_category_reviewed"] = True
-                            else:
-                                # Apply to this transaction only
-                                updated.at[transaction_index, "merchant"] = edited_merchant
-                                updated.at[transaction_index, "main_category"] = selected_main
-                                updated.at[transaction_index, "sub_category"] = (
-                                    "N/A" if selected_main == "Transfer" else selected_sub
-                                )
-                                updated.at[transaction_index, "_category_reviewed"] = True
-                            st.session_state.editable_transactions = updated
-                            st.session_state.pop(batch_key, None)
-                            st.session_state.pop(
-                                f"export_editor_{st.session_state.export_editor_revision}",
-                                None,
-                            )
-                            st.session_state.export_editor_revision += 1
-                            st.session_state.ai_review_expanded = True
-                            st.rerun()
+            with nav_cols[2]:
+                if cursor < len(candidate_rows) - 1:
+                    if st.button("Next →", key=f"flag_next_{current_idx}"):
+                        st.session_state.flag_review_cursor = cursor + 1
+                        st.rerun()
 
+            st.markdown("---")
+
+            if st.button(
+                f"Apply & go to next ({len(candidate_rows) - cursor - 1} remaining)",
+                type="primary",
+                key=f"flag_apply_{current_idx}",
+            ):
+                problem = edited_row_problem(merchant_input, main_category, sub_category)
+                if problem:
+                    st.error(f"Cannot apply: {problem}. Fix it first.")
+                elif main_category == "General Spending":
+                    st.error(
+                        "**General Spending** is the default fallback category and cannot "
+                        "be selected here. Choose a real category (e.g. Food & Dining, "
+                        "Transportation, Entertainment, etc.) before applying."
+                    )
+                else:
+                    updated = st.session_state.editable_transactions.copy()
+
+                    resolved_sub = (
+                        "N/A" if main_category == "Transfer"
+                        else sub_category
+                    )
+                    updated.at[current_idx, "merchant"] = str(merchant_input).strip()
+                    updated.at[current_idx, "main_category"] = main_category
+                    updated.at[current_idx, "sub_category"] = resolved_sub
+                    updated.at[current_idx, "_category_reviewed"] = True
+
+                    # Store mapping in session only — no disk writes
+                    cleaned_desc = clean_description_for_matching(str(row["description"]))
+                    if cleaned_desc:
+                        st.session_state.session_merchant_cache[cleaned_desc] = str(merchant_input).strip()
+                        st.session_state.session_category_cache[cleaned_desc] = {
+                            "main_category": main_category,
+                            "sub_category": resolved_sub,
+                        }
+
+                    st.session_state.editable_transactions = updated
+                    st.session_state.review_expanded = True
+                    st.rerun()
     download_data, validation_error = validate_final_export_rows(edited_transactions)
     download_data = sort_rows_by_date(download_data).reset_index(drop=True)
     if pair_mismatch.any():
@@ -1258,32 +1112,49 @@ if (
         )
 
     if row_issues:
-        issue_links = []
-        for row_index in row_issues:
-            row_number = editor_row_numbers.iloc[row_index]
-            row_number = int(row_number) if pd.notna(row_number) else row_index + 1
-            issue_links.append(f"[Row {row_number}](#transaction-issue-{row_index})")
-        st.error("Fix invalid rows before downloading: " + " | ".join(issue_links))
-        st.markdown("#### Rows needing attention")
+        issue_kinds = {tuple(issues) for issues in row_issues.values()}
+        only_category_review = issue_kinds == {("Category needs review before download.",)}
+        if only_category_review:
+            st.warning(
+                f"{len(row_issues):,} transaction(s) still need a category review "
+                "before downloading. Assign a category or tick Category reviewed "
+                "to confirm General Spending."
+            )
+        else:
+            st.error(f"{len(row_issues):,} transaction(s) need changes before downloading.")
+        st.caption(
+            "Row numbers match the Row column in the table above. "
+            "Edit those transactions there, then download again."
+        )
+        issue_rows = []
         for row_index, issues in row_issues.items():
             row = edited_transactions.iloc[row_index]
             row_number = editor_row_numbers.iloc[row_index]
-            row_number = int(row_number) if pd.notna(row_number) else row_index + 1
-            details = [
-                f"<strong>Row {row_number}</strong>",
-                f"Date: {escape(str(row['date']))}",
-                f"Description: {escape(str(row['description']))}",
-                f"Merchant: {escape(str(row['merchant']))}",
-                f"Issue: {escape(' '.join(issues))}",
-            ]
-            st.markdown(
-                f"<div id=\"transaction-issue-{row_index}\" "
-                "style=\"background-color:#FDECEC;color:#7F1D1D;"
-                "border-left:4px solid #D93025;padding:10px 12px;margin:6px 0;\">"
-                + "<br>".join(details)
-                + "</div>",
-                unsafe_allow_html=True,
+            issue_rows.append(
+                {
+                    "Row": int(row_number) if pd.notna(row_number) else row_index + 1,
+                    "Date": "" if pd.isna(row["date"]) else str(row["date"]),
+                    "Description": "" if pd.isna(row["description"]) else str(row["description"]),
+                    "Merchant": "" if pd.isna(row["merchant"]) else str(row["merchant"]),
+                    "Amount": row["amount"],
+                    "What to fix": "" if only_category_review else " · ".join(issues),
+                }
             )
+        issue_table = pd.DataFrame(issue_rows)
+        if only_category_review:
+            issue_table = issue_table.drop(columns=["What to fix"])
+        column_config = {
+            "Row": st.column_config.NumberColumn("Row", width="small"),
+            "Amount": st.column_config.NumberColumn("Amount", format="$%.2f"),
+        }
+        if not only_category_review:
+            column_config["What to fix"] = st.column_config.TextColumn("What to fix")
+        st.dataframe(
+            issue_table,
+            width='stretch',
+            hide_index=True,
+            column_config=column_config,
+        )
     amounts = pd.to_numeric(download_data["amount"], errors="coerce")
     metric_columns = st.columns(3)
     metric_columns[0].metric("Transactions", f"{len(download_data):,}")
@@ -1319,7 +1190,7 @@ if (
                 dropped_transactions,
                 key=f"dropped_editor_{st.session_state.dropped_editor_revision}",
                 num_rows="fixed",
-                use_container_width=True,
+                width='stretch',
                 hide_index=True,
                 column_config={
                     "date": st.column_config.TextColumn("Date (MM/DD/YYYY)"),

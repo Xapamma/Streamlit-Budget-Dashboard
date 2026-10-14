@@ -170,7 +170,7 @@ if selected_main:
     if not subcategory_totals.empty:
         st.bar_chart(subcategory_totals, x_label="Subcategory", y_label="Spending ($)")
         subcategory_detail = subcategory_totals.rename("Spending").reset_index()
-        st.dataframe(subcategory_detail, use_container_width=True, hide_index=True)
+        st.dataframe(subcategory_detail, width='stretch', hide_index=True)
 
 st.subheader("Transactions by category")
 category_review = transactions_for_category_review(selected)
@@ -267,7 +267,7 @@ else:
         transaction_editor_data,
         key=f"analytics_transactions_{st.session_state.analytics_transaction_editor_revision}",
         num_rows="fixed",
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
         column_config={
             "date": st.column_config.TextColumn("Date", disabled=True),

@@ -1,0 +1,10 @@
+[theme]
+base = "light"
+
+[server]
+# Allow larger content to be displayed without issues
+maxMessageSize = 200
+
+[browser]
+# Use the full browser width
+gatherUsageStats = false

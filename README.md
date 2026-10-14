@@ -1,6 +1,6 @@
 # Streamlit Budget Dashboard
 
-This project imports personal bank CSVs in a local Streamlit app, normalizes them to one transaction schema, applies merchant/category rules, and exports a categorized CSV. Optional AI suggestions (bring your own API key) can help resolve unfamiliar merchants after the deterministic rules and the read-only master merchant/category mapping.
+This project imports personal bank CSVs in a local Streamlit app, normalizes them to one transaction schema, applies merchant/category rules, and exports a categorized CSV. Unresolved transactions are reviewed manually; approved merchant and category choices are saved so matching descriptions in future statements follow them automatically.
 
 ---
 
@@ -11,8 +11,8 @@ This project imports personal bank CSVs in a local Streamlit app, normalizes the
 - Re-import a file with changed settings to replace that filename's rows; removing an upload removes its imported, edited, and excluded rows.
 - Review and edit dates, descriptions, merchants, amounts, categories, and transaction types before export.
 - Review declined, payment, and transfer rows with reasons; restore selected rows after validation.
-- Optionally request an AI merchant suggestion (Gemini, OpenRouter, Ollama Cloud, or local Ollama) for unresolved transactions and apply it to that transaction in the current session only.
-- Ask app-usage questions in the sidebar's AI help chat; it only receives the question and a short help conversation, not imported transaction data.
+- Review unresolved transactions in one editable list; assign or confirm each merchant and category, and the mapping is saved so the same description is auto-filled and skipped next time.
+- Descriptions that match a saved mapping are already categorized and never appear in the review list.
 - Import defaults for each built-in or custom bank come from the read-only seed formats supplied with the app; nothing is saved from the UI.
 - Search transactions with case-insensitive fuzzy matching.
 - Navigate between Home, statement processing, Overview, Analytics, and Budget pages.
@@ -22,7 +22,7 @@ This project imports personal bank CSVs in a local Streamlit app, normalizes the
 
 ## Privacy
 
-Bank data is sensitive. `.data/`, the generated categorized CSV, and `bank_profiles.json` are ignored and excluded from version control for new commits. The app processes CSV data locally. The master merchant and category mappings (`merchant_cache.json`, `category_cache.json`) are read-only seed files used only for merchant resolution and category defaults. AI providers are not called unless the user configures one and requests a suggestion or help answer; then only the selected description, amount, and allowed categories (or the help question) are sent. Files previously pushed to a remote remain in Git history unless that history is separately rewritten.
+Bank data is sensitive. `.data/`, the generated categorized CSV, and `bank_profiles.json` are ignored and excluded from version control for new commits. The app processes CSV data entirely locally — no data is sent to any external service. The merchant and category mappings (`merchant_cache.json`, `category_cache.json`) are updated in place when you apply reviewed transactions, so keep them in version control if you want your mapping history tracked. Files previously pushed to a remote remain in Git history unless that history is separately rewritten.
 
 ## Project Structure
 - `dashboard.py`: multipage Streamlit entrypoint and navigation.
@@ -32,9 +32,6 @@ Bank data is sensitive. `.data/`, the generated categorized CSV, and `bank_profi
 - `transaction_import.py`: canonical transaction normalization and validation.
 - `final_export.py`: merchant resolution, exclusions, categories, validation, and export formatting.
 - `cleaning_logic.py`: merchant rules and category hierarchy.
-- `merchant_assistance.py`: AI merchant suggestions (session-only; never writes the master mapping).
-- `ai_providers.py`: provider calls (Gemini, OpenRouter, Ollama Cloud/local) using user-supplied keys.
-- `ai_settings.py`: sidebar AI provider, model, and key settings.
 - `bank_profiles.py`: read-only bank CSV format seeds for built-in and custom banks.
 - `fuzzy_search.py`: shared fuzzy matching for local search fields.
 - `tests/test_transaction_import.py`: importer/exporter regression tests.
@@ -76,26 +73,9 @@ Imported, edited, and excluded-review rows remain in the session when you leave 
 
 The download uses the same nine columns as the example file: `date`, `description`, `merchant`, `type`, `amount`, `main_category`, `sub_category`, `bank`, and `account`. Export dates use `MM/DD/YYYY`. The editable preview and download are sorted oldest to newest by transaction date, including after date edits; invalid dates remain at the bottom for correction. Before downloading, review dates, signs, amounts, merchants, and categories. Unmatched spending is flagged for category review and blocks download until you assign a category or explicitly confirm General Spending. Category and merchant edits apply only to the current session and are never written to the master merchant/category mapping; download your CSV to keep them. For a transfer not caught by the rules, set its main category to `Transfer`; the subcategory becomes `N/A`, and the row moves to the excluded review list instead of the export. Search the editable transaction preview by text; searches ignore case and tolerate typos, and filtering does not remove hidden transactions. Known descriptions use the existing merchant rules and the read-only master mapping; unrecognized descriptions appear in the review queue. For an unresolved transaction, the optional AI tool suggests a merchant and a main/subcategory from the app's allowed choices. Known merchant rules take precedence; for a new merchant, the AI category pair is preselected. Applying a suggestion only updates the session's transaction, never the master mapping. The unresolved count updates as matches are applied.
 
-For an unresolved transaction, choose a provider under **AI settings** in the sidebar first (see [AI providers](#ai-providers)).
+
 
 The download columns are `date`, `description`, `merchant`, `type`, `amount`, `main_category`, `sub_category`, `bank`, and `account`. Dates export as `MM/DD/YYYY`.
-
-## AI providers
-
-Open **AI settings** in the sidebar, choose a provider, paste your own API key, pick a model, confirm the privacy notice, and optionally press **Test connection**. You pay for and are responsible for your own usage, quotas, and the provider's terms; free tiers and model names change, so check each provider's pricing page.
-
-| Provider | Get a key | Privacy / pricing |
-| --- | --- | --- |
-| Google Gemini | [AI Studio](https://aistudio.google.com/apikey) | [Terms](https://ai.google.dev/gemini-api/terms), [pricing](https://ai.google.dev/gemini-api/docs/pricing) |
-| OpenRouter | [Keys](https://openrouter.ai/keys) | [Privacy](https://openrouter.ai/privacy), [models](https://openrouter.ai/models) |
-| Ollama Cloud | [Keys](https://ollama.com/settings/keys) | [Privacy](https://ollama.com/privacy), [docs](https://docs.ollama.com/cloud) |
-| Ollama (local) | no key; [install Ollama](https://ollama.com/download) and `ollama pull <model>` | runs on your computer; only works when the app also runs locally |
-
-- Keys live only in your Streamlit session memory; they are never written to disk, the database, or logs. **Clear API key** removes it. A password field only hides the key on screen, and the hosting server still handles it, so use a spend-limited key and revoke it afterward.
-- Free tiers may use your prompts for training or human review. The app shows a notice per provider and requires confirmation for cloud providers. Never include sensitive details in the help chat; suggestions send only a transaction description and amount.
-- Nothing is sent to a provider other than the one you selected, and there is no automatic fallback. Model names listed are suggestions that are not verified; type any model your provider supports.
-- Deploying to Streamlit Community Cloud needs no app-level AI secret. Don't put user keys in the app's shared secrets. The master merchant/category mapping files are read-only seeds; user edits never persist there.
-- To refresh dependencies after this change run `uv lock` (the old optional `ai` extra was removed).
 
 ## Current Scope
 

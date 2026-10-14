@@ -1,6 +1,6 @@
 # Streamlit Budget Dashboard — Project Overview
 
-> **A multipage Streamlit app that normalizes bank-statement CSVs into a categorized transaction list, provides dashboards, analytics, and monthly budget planning, and optionally uses an AI provider (Gemini / OpenRouter / Ollama) to suggest merchant names and categories for unfamiliar transactions.**
+> **A multipage Streamlit app that normalizes bank-statement CSVs into a categorized transaction list, provides dashboards, analytics, and monthly budget planning. Unresolved merchants and categories are reviewed manually; approved mappings are saved so future statements follow them automatically.**
 
 ---
 
@@ -12,8 +12,7 @@ uv run streamlit run dashboard.py
 ```
 
 **Requirements:** Python ≥ 3.13 (enforced by `.python-version` and `pyproject.toml`).  
-**Dependencies:** streamlit, pandas, altair, openpyxl, reportlab, rapidfuzz.  
-**AI is optional:** Bring your own API key for Gemini, OpenRouter, or Ollama Cloud (or use local Ollama with no key).
+**Dependencies:** streamlit, pandas, altair, openpyxl, reportlab, rapidfuzz.
 
 ---
 
@@ -25,10 +24,7 @@ Streamlit-Budget-Dashboard/
 ├── app.py                        # Main CSV import, review, category editing, export
 ├── cleaning_logic.py             # Deterministic merchant rules + category hierarchy
 ├── transaction_import.py         # CSV loading → standardized 13-column schema
-├── final_export.py               # Standardized → categorized 9-column export
-├── merchant_assistance.py        # AI merchant/category suggestions (session-only)
-├── ai_providers.py               # Provider API layer (Gemini, OpenRouter, Ollama)
-├── ai_settings.py                # Sidebar UI for AI provider/model/key settings
+├── final_export.py               # Standardized → categorized 9-col export + mapping persistence
 ├── bank_profiles.py              # Read-only bank CSV format seeds (JSON)
 ├── fuzzy_search.py               # RapidFuzz-based case-insensitive matching
 ├── dashboard_data.py             # Financial summaries for Overview, Analytics, Budget
@@ -41,8 +37,7 @@ Streamlit-Budget-Dashboard/
 │   ├── analytics.py              # Date-range income/spending/net-savings analytics
 │   └── budget.py                 # Monthly budget editor with PDF/Excel export
 ├── tests/
-│   ├── test_ai_providers.py      # AI provider unit tests
-│   └── test_transaction_import.py # Integration + unit tests (1330+ lines)
+│   └── test_transaction_import.py # Integration + unit tests (1100+ lines)
 ├── .data/                        # [Git-ignored] local data directory
 ├── bank_profiles.json            # [Git-ignored] seed bank CSV formats
 ├── category_cache.json           # Master seed: normalized description → category pair
@@ -88,9 +83,7 @@ app.py — format_final_export(standardized)
 app.py — FINAL_EXPORT_COLUMNS (9-col DataFrame) + source metadata
     │
     ├── User reviews in data editor
-    ├── AI suggestion flow (optional):
-    │   description + amount → ai_providers.py → merchant + category pair
-    │   User applies → updates session rows only (never the master mapping)
+    │   └── Edits saved as persistent mappings (merchant_cache.json + category_cache.json)
     │
     ▼
 app.py — Download categorized CSV / Transfer to excluded
@@ -130,7 +123,7 @@ The largest module. Handles:
 5. **Sign convention** — Single signed amount vs split debit/credit columns.
 6. **Import execution** — `load_transactions()` → `format_final_export()`.
 7. **Transaction editor** — `st.data_editor` with selectable categories; searchable.
-8. **Category review panel** — Unresolved transactions + optional AI batch suggestion.
+8. **Category review panel** — Unresolved transactions listed with an editable table; apply saves the mapping.
 9. **Transfer/excluded review** — Removed rows with restore support.
 10. **Export download** — CSV, 9 columns, `MM/DD/YYYY` dates.
 
@@ -161,23 +154,8 @@ The largest module. Handles:
 - **`add_categories(df)`** — Adds main_category/sub_category columns.
 - **`clean_description_for_matching()`** — Strips bank noise, removes non-alpha chars (except `& ' -`), lowercases, normalizes whitespace.
 
-### `merchant_assistance.py` — AI Suggestions (Session-Only)
-- `suggest_merchant_and_category()` — Retries up to 5 times; validates category pair.
-- `suggest_merchant_categories_batch()` — Batches multiple resolutions.
-- `load_merchant_cache()` — Read-only access to the master merchant mapping.
-- `ask_app_help()` — AI chat for app-usage questions (no transaction data sent).
-
-### `ai_providers.py` — Provider API Layer
-- 4 providers: `gemini`, `openrouter`, `ollama_cloud`, `ollama_local`.
-- `AISettings` dataclass — key in memory only; `__repr__` redacts it.
-- `_redact()` — Strips key from error messages.
-- `chat()` / `chat_json()` — Text and JSON response handlers.
-- **Timeout:** 60s.
-
-### `ai_settings.py` — Sidebar AI Settings UI
-- `render_ai_settings()` returns `AISettings` or `None`.
-- Provider selector, password field, model input, privacy notice + checkbox, test connection, clear key.
-- Keys stored per-provider in `st.session_state.ai_key_{provider}`.
+### `final_export.py` — Mapping Persistence (was `merchant_assistance.py` / `ai_providers.py` / `ai_settings.py`)
+The AI suggestion modules were removed. Category and merchant review is now fully manual: unresolved transactions appear in an editable review table; applying changes saves them as persistent mappings (via `save_approved_mappings()`) so matching descriptions skip the review list in future imports.
 
 ### Supporting Modules
 - **`bank_profiles.py`** — `load_bank_profiles()` (read-only seed formats).
@@ -206,9 +184,9 @@ When editable data changes programmatically, increment a revision counter, pop t
 
 ### 4. Multi-Layer Category Resolution
 ```
-User edits (session-only)  ← apply to current transactions only
+User edits  ← apply to current transactions; reviewed rows are saved as mappings
     ↑
-Read-only master mapping (merchant_cache.json + category_cache.json)
+Persistent saved mapping (merchant_cache.json + category_cache.json)
     ↑
 Deterministic rules (cleaning_logic.py: add_categories)
     ↑
@@ -221,12 +199,8 @@ Fallback (General Spending/Other or Income/Other Income)
 - User can mark rows as Transfer → moved to excluded with sub_category "N/A".
 - Excluded rows can be restored via `restored_rows_to_standardized()`.
 
-### 6. Security-First AI Design
-- Keys never written to disk, logs, or error messages.
-- `_redact()` filters keys from all error output.
-- `AISettings.__repr__` hides the key.
-- Provider-specific privacy notices require explicit checkbox acknowledgment.
-- Help chat explicitly excludes transaction data.
+### 6. AI Modules Removed
+The AI suggestion and help-chat features (`ai_providers.py`, `ai_settings.py`, `merchant_assistance.py`) were removed in favor of a simpler manual review flow. See `final_export.save_approved_mappings()` for the persistence layer that replaced session-only edits.
 
 ### 7. Normalized Descriptions for the Master Mapping
 `clean_description_for_matching()` strips bank noise, removes non-alpha characters, lowercases, and normalizes whitespace. This makes mapping keys stable despite bank formatting variations.
@@ -255,32 +229,7 @@ Displayed as `"Main :: Sub"` composite labels:
 
 ---
 
-## AI Integration
 
-### Providers
-| Provider | Key Needed | Default Model | Key URL |
-|----------|-----------|---------------|---------|
-| Google Gemini | Yes | gemini-2.5-flash | aistudio.google.com/apikey |
-| OpenRouter | Yes | openrouter/free | openrouter.ai/keys |
-| Ollama Cloud | Yes | gpt-oss:120b | ollama.com/settings/keys |
-| Ollama Local | No | gemma3:4b | ollama.com/download |
-
-### API Call Flow
-```
-render_ai_settings() → AISettings(provider, model, api_key)
-    ↓
-suggest_merchant_and_category(description, amount, categories, settings)
-    ↓
-chat_json(settings, prompt)  ← up to 5 retries on invalid JSON
-    ↓
-_DISPATCH[provider] → provider-specific HTTP call (60s timeout)
-    ↓
-Returns JSON: {"merchant", "main_category", "sub_category"}
-    ↓
-Validated against allowed category set → returned to UI
-    ↓
-User applies → updates session rows only (never the master mapping)
-```
 
 ---
 
@@ -293,15 +242,6 @@ User applies → updates session rows only (never the master mapping)
 | `editable_transactions` | pd.DataFrame | 9-col export + `_source_file`, `_source_row`, `_category_reviewed` |
 | `dropped_transactions` | pd.DataFrame | Excluded rows + `removal_reason`, `status`, `restore` |
 | `uploaded_file_infos` | list[dict] | Metadata about uploaded files |
-
-### AI Settings
-| Key | Description |
-|-----|-------------|
-| `ai_provider` | Selected provider name |
-| `ai_key_{provider}` | API key (per-provider) |
-| `ai_ack_{provider}` | Privacy acknowledgment |
-| `ai_model_{provider}` | Model name |
-| `ai_settings_ready` | Shortcut flag |
 
 ### Budget
 | Key | Description |
@@ -351,9 +291,8 @@ uv run python -m unittest discover tests
 | Add/modify merchant rules | `cleaning_logic.py` |
 | Change category hierarchy | `cleaning_logic.py` (category_hierarchy) |
 | Change export columns | `final_export.py` + `transaction_import.py` |
-| Add new AI provider | `ai_providers.py` (PROVIDERS + _DISPATCH) |
-| Modify AI prompt | `merchant_assistance.py` |
-| Edit master mapping seeds | `merchant_cache.json` + `category_cache.json` (read-only at runtime) |
+| Save reviewed mapping | `final_export.py` (`save_approved_mappings`) |
+| Edit master mapping seeds | `merchant_cache.json` + `category_cache.json` (persisted at runtime) |
 | Add new page | Create in `pages/`, register in `dashboard.py` |
 | Add new financial metric | `dashboard_data.py` |
 | Modify budget export | `budget_export.py` |
