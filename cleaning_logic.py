@@ -168,7 +168,7 @@ sub_category_map = {
     "Roxberry Juice Co.": "Fast Food",
     "Chromis Bakery": "Fast Food",
     "Willy Dany": "Fast Food",
-    "Dolce Freddo": "Fast Food",
+    "Dolce Freddo": "Snacks",
     "Leatherby'S Family Cream": "Fast Food",
     "Fabulous Freddy's": "Fast Food",
     "Cheesecake Factory": "Restaurants/Dining",

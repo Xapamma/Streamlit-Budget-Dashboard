@@ -154,8 +154,8 @@ The largest module. Handles:
 - **`add_categories(df)`** — Adds main_category/sub_category columns.
 - **`clean_description_for_matching()`** — Strips bank noise, removes non-alpha chars (except `& ' -`), lowercases, normalizes whitespace.
 
-### `final_export.py` — Mapping Persistence (was `merchant_assistance.py` / `ai_providers.py` / `ai_settings.py`)
-The AI suggestion modules were removed. Category and merchant review is now fully manual: unresolved transactions appear in an editable review table; applying changes saves them as persistent mappings (via `save_approved_mappings()`) so matching descriptions skip the review list in future imports.
+### `final_export.py` — Mapping Persistence
+Category and merchant review is manual: unresolved transactions appear in a one-by-one review flow; applying changes saves them as persistent mappings (via `save_approved_mappings()`) so matching descriptions skip the review list in future imports.
 
 ### Supporting Modules
 - **`bank_profiles.py`** — `load_bank_profiles()` (read-only seed formats).
@@ -259,7 +259,7 @@ Displayed as `"Main :: Sub"` composite labels:
 
 ### Test Files
 - **`tests/test_transaction_import.py`** (~1330 lines) — Capital One/Goldenwest/SoFi imports, custom banks, delimiters, number formats, declined rows, caches, validation, integration flows with `AppTest`.
-- **`tests/test_ai_providers.py`** (~113 lines) — Key isolation, error redaction, local Ollama, session isolation, privacy acknowledgment.
+
 
 ### Running Tests
 ```bash

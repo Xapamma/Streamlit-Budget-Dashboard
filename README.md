@@ -49,8 +49,6 @@ uv sync
 uv run streamlit run dashboard.py
 ```
 
-AI is optional. See [AI providers](#ai-providers) below.
-
 ---
 
 ## Usage
@@ -71,7 +69,7 @@ Upload one or more bank statement CSVs, choose each file, select its bank and ac
 
 Imported, edited, and excluded-review rows remain in the session when you leave Process statements or remove a file from the uploader. Use **Remove one statement's data** or **Clear imported data** to delete them explicitly. Re-submitting the same filename with changed columns, sign convention, delimiter, or number format replaces its previous rows. Submitting an unchanged file with unchanged settings is blocked to avoid duplicates. Filenames must be unique among the currently uploaded statements.
 
-The download uses the same nine columns as the example file: `date`, `description`, `merchant`, `type`, `amount`, `main_category`, `sub_category`, `bank`, and `account`. Export dates use `MM/DD/YYYY`. The editable preview and download are sorted oldest to newest by transaction date, including after date edits; invalid dates remain at the bottom for correction. Before downloading, review dates, signs, amounts, merchants, and categories. Unmatched spending is flagged for category review and blocks download until you assign a category or explicitly confirm General Spending. Category and merchant edits apply only to the current session and are never written to the master merchant/category mapping; download your CSV to keep them. For a transfer not caught by the rules, set its main category to `Transfer`; the subcategory becomes `N/A`, and the row moves to the excluded review list instead of the export. Search the editable transaction preview by text; searches ignore case and tolerate typos, and filtering does not remove hidden transactions. Known descriptions use the existing merchant rules and the read-only master mapping; unrecognized descriptions appear in the review queue. For an unresolved transaction, the optional AI tool suggests a merchant and a main/subcategory from the app's allowed choices. Known merchant rules take precedence; for a new merchant, the AI category pair is preselected. Applying a suggestion only updates the session's transaction, never the master mapping. The unresolved count updates as matches are applied.
+The download uses the same nine columns as the example file: `date`, `description`, `merchant`, `type`, `amount`, `main_category`, `sub_category`, `bank`, and `account`. Export dates use `MM/DD/YYYY`. The editable preview and download are sorted oldest to newest by transaction date, including after date edits; invalid dates remain at the bottom for correction. Before downloading, review dates, signs, amounts, merchants, and categories. Unmatched spending is flagged for category review and blocks download until you assign a category or explicitly confirm General Spending. Category and merchant edits apply only to the current session and are never written to the master merchant/category mapping; download your CSV to keep them. For a transfer not caught by the rules, set its main category to `Transfer`; the subcategory becomes `N/A`, and the row moves to the excluded review list instead of the export. Search the editable transaction preview by text; searches ignore case and tolerate typos, and filtering does not remove hidden transactions. Known descriptions use the existing merchant rules and the read-only master mapping; unrecognized descriptions appear in the review queue. The unresolved count updates as matches are applied.
 
 
 

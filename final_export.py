@@ -604,7 +604,7 @@ def format_final_export(
 
     Known merchants are identified using the existing description rules and
     merchant cache. Unknown descriptions remain as the merchant label so they
-    can be reviewed and categorized later; this function never calls an LLM.
+    can be reviewed and categorized later.
     """
     required_columns = {"date", "description", "amount", "transaction_type", "bank", "account"}
     missing_columns = required_columns - set(transactions.columns)

@@ -39,7 +39,6 @@ from final_export import (
     get_final_export_row_issues,
     load_category_cache,
     load_merchant_cache,
-    merchant_needs_review,
     normalize_account_type,
     normalize_bank_name,
     normalize_export_filename,
@@ -738,8 +737,7 @@ if (
         "Change merchants and categories directly in the table or in the review list below. "
         "Reviewed merchant and category choices are saved as mappings, so matching descriptions "
         "in future statements follow them automatically and skip the review list. "
-        "Unmatched spending starts unchecked in Category reviewed; assign a category or explicitly "
-        "check it to keep General Spending before downloading. "
+        "Transactions under General Spending must be updated to a real category in the review panel. "
         "Review transfers carefully: if a transfer was not caught by the rules, set its main category "
         "to Transfer. The app fills N/A and moves it to the excluded transaction review list."
     )
@@ -798,18 +796,14 @@ if (
             ),
             "amount": st.column_config.NumberColumn("Amount", format="$%.2f", required=True),
             "main_category": st.column_config.SelectboxColumn(
-                "Main category", options=FINAL_MAIN_CATEGORY_OPTIONS, required=True
+                "Main category", options=[c for c in FINAL_MAIN_CATEGORY_OPTIONS if c != "General Spending"], required=True
             ),
             "sub_category": st.column_config.SelectboxColumn(
                 "Sub-category (Main :: Sub)", options=CATEGORY_PAIR_OPTIONS, required=True
             ),
             "bank": st.column_config.SelectboxColumn("Bank", options=bank_options, required=True),
             "account": st.column_config.SelectboxColumn("Account", options=account_options, required=True),
-            "_category_reviewed": st.column_config.CheckboxColumn(
-                "Category reviewed",
-                default=False,
-                help="Uncheck to prevent download until this transaction's category is reviewed.",
-            ),
+            "_category_reviewed": None,
             "_source_file": None,
             "_source_row": None,
         },
@@ -948,12 +942,10 @@ if (
         st.session_state.export_editor_revision += 1
         st.rerun()
 
-    merchant_cache = {**load_merchant_cache(), **st.session_state.session_merchant_cache}
     candidate_rows = [
         index
         for index, row in st.session_state.editable_transactions.iterrows()
         if not bool(row["_category_reviewed"])
-        or merchant_needs_review(str(row["description"]), str(row["merchant"]), merchant_cache)
     ]
     with st.expander(
         f"Transactions needing review · {len(candidate_rows)} unresolved",
@@ -967,6 +959,7 @@ if (
 
         if not candidate_rows:
             st.info("No unresolved transactions need review.")
+            st.session_state.pop("review_queue_total", None)
         else:
             # --- One-by-one flagged transaction review ---
             if "flag_review_cursor" not in st.session_state:
@@ -980,8 +973,16 @@ if (
             current_idx = candidate_rows[cursor]
             row = st.session_state.editable_transactions.loc[current_idx]
 
-            progress_text = f"Transaction {cursor + 1} of {len(candidate_rows)}"
-            st.progress((cursor + 1) / len(candidate_rows), text=progress_text)
+            # The counter reflects saved work: Next/Previous only change which
+            # transaction is shown, so progress advances only when Apply is pressed
+            # (which shrinks the queue). Recompute the baseline when data changes.
+            if st.session_state.get("review_queue_total", 0) < len(candidate_rows):
+                st.session_state.review_queue_total = len(candidate_rows)
+            review_total = st.session_state.get("review_queue_total", len(candidate_rows))
+            reviewed_so_far = max(review_total - len(candidate_rows), 0)
+
+            progress_text = f"{reviewed_so_far} of {review_total} reviewed"
+            st.progress(reviewed_so_far / max(review_total, 1), text=progress_text)
 
             # Exclude "General Spending" from the dropdown — it is a default fallback,
             # not a legitimate category choice for the review flow.
@@ -1038,6 +1039,43 @@ if (
                         key=f"flag_sub_cat_{current_idx}",
                     )
 
+            def save_current() -> None:
+                """Validate and save the current transaction, then rerun so it leaves the queue."""
+                problem = edited_row_problem(merchant_input, main_category, sub_category)
+                if problem:
+                    st.error(f"Cannot apply: {problem}. Fix it first.")
+                    return
+                if main_category == "General Spending":
+                    st.error(
+                        "**General Spending** is the default fallback category and cannot "
+                        "be selected here. Choose a real category (e.g. Food & Dining, "
+                        "Transportation, Entertainment, etc.) before applying."
+                    )
+                    return
+                updated = st.session_state.editable_transactions.copy()
+
+                resolved_sub = (
+                    "N/A" if main_category == "Transfer"
+                    else sub_category
+                )
+                updated.at[current_idx, "merchant"] = str(merchant_input).strip()
+                updated.at[current_idx, "main_category"] = main_category
+                updated.at[current_idx, "sub_category"] = resolved_sub
+                updated.at[current_idx, "_category_reviewed"] = True
+
+                # Store mapping in session only — no disk writes
+                cleaned_desc = clean_description_for_matching(str(row["description"]))
+                if cleaned_desc:
+                    st.session_state.session_merchant_cache[cleaned_desc] = str(merchant_input).strip()
+                    st.session_state.session_category_cache[cleaned_desc] = {
+                        "main_category": main_category,
+                        "sub_category": resolved_sub,
+                    }
+
+                st.session_state.editable_transactions = updated
+                st.session_state.review_expanded = True
+                st.rerun()
+
             nav_cols = st.columns([1, 2, 1])
             with nav_cols[0]:
                 if cursor > 0:
@@ -1058,39 +1096,7 @@ if (
                 type="primary",
                 key=f"flag_apply_{current_idx}",
             ):
-                problem = edited_row_problem(merchant_input, main_category, sub_category)
-                if problem:
-                    st.error(f"Cannot apply: {problem}. Fix it first.")
-                elif main_category == "General Spending":
-                    st.error(
-                        "**General Spending** is the default fallback category and cannot "
-                        "be selected here. Choose a real category (e.g. Food & Dining, "
-                        "Transportation, Entertainment, etc.) before applying."
-                    )
-                else:
-                    updated = st.session_state.editable_transactions.copy()
-
-                    resolved_sub = (
-                        "N/A" if main_category == "Transfer"
-                        else sub_category
-                    )
-                    updated.at[current_idx, "merchant"] = str(merchant_input).strip()
-                    updated.at[current_idx, "main_category"] = main_category
-                    updated.at[current_idx, "sub_category"] = resolved_sub
-                    updated.at[current_idx, "_category_reviewed"] = True
-
-                    # Store mapping in session only — no disk writes
-                    cleaned_desc = clean_description_for_matching(str(row["description"]))
-                    if cleaned_desc:
-                        st.session_state.session_merchant_cache[cleaned_desc] = str(merchant_input).strip()
-                        st.session_state.session_category_cache[cleaned_desc] = {
-                            "main_category": main_category,
-                            "sub_category": resolved_sub,
-                        }
-
-                    st.session_state.editable_transactions = updated
-                    st.session_state.review_expanded = True
-                    st.rerun()
+                save_current()
     download_data, validation_error = validate_final_export_rows(edited_transactions)
     download_data = sort_rows_by_date(download_data).reset_index(drop=True)
     if pair_mismatch.any():
@@ -1099,7 +1105,7 @@ if (
     if unreviewed_mask.any():
         validation_error = (
             f"Review the category for {int(unreviewed_mask.sum())} transaction(s) before downloading. "
-            "Choose a category or explicitly confirm General Spending."
+            "Transactions under General Spending must be updated to a real category."
         )
     row_issues = get_final_export_row_issues(edited_transactions)
     for row_index in pair_mismatch[pair_mismatch].index:
@@ -1117,44 +1123,11 @@ if (
         if only_category_review:
             st.warning(
                 f"{len(row_issues):,} transaction(s) still need a category review "
-                "before downloading. Assign a category or tick Category reviewed "
-                "to confirm General Spending."
+                "before downloading. They are currently under General Spending and "
+                "need to be updated to a real category in the review panel."
             )
         else:
             st.error(f"{len(row_issues):,} transaction(s) need changes before downloading.")
-        st.caption(
-            "Row numbers match the Row column in the table above. "
-            "Edit those transactions there, then download again."
-        )
-        issue_rows = []
-        for row_index, issues in row_issues.items():
-            row = edited_transactions.iloc[row_index]
-            row_number = editor_row_numbers.iloc[row_index]
-            issue_rows.append(
-                {
-                    "Row": int(row_number) if pd.notna(row_number) else row_index + 1,
-                    "Date": "" if pd.isna(row["date"]) else str(row["date"]),
-                    "Description": "" if pd.isna(row["description"]) else str(row["description"]),
-                    "Merchant": "" if pd.isna(row["merchant"]) else str(row["merchant"]),
-                    "Amount": row["amount"],
-                    "What to fix": "" if only_category_review else " · ".join(issues),
-                }
-            )
-        issue_table = pd.DataFrame(issue_rows)
-        if only_category_review:
-            issue_table = issue_table.drop(columns=["What to fix"])
-        column_config = {
-            "Row": st.column_config.NumberColumn("Row", width="small"),
-            "Amount": st.column_config.NumberColumn("Amount", format="$%.2f"),
-        }
-        if not only_category_review:
-            column_config["What to fix"] = st.column_config.TextColumn("What to fix")
-        st.dataframe(
-            issue_table,
-            width='stretch',
-            hide_index=True,
-            column_config=column_config,
-        )
     amounts = pd.to_numeric(download_data["amount"], errors="coerce")
     metric_columns = st.columns(3)
     metric_columns[0].metric("Transactions", f"{len(download_data):,}")

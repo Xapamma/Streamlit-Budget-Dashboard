@@ -14,7 +14,7 @@ uv run python -m unittest discover tests  # Run all tests
 
 ### Entrypoint & Pages
 - **`dashboard.py`** — Multipage entrypoint. `st.navigation(pages, position="sidebar")`.
-- **`app.py`** (~1400 lines) — Main "Process statements" page. CSV import, column mapping, transaction editor, category/AI review, exclusion, export.
+- **`app.py`** (~1400 lines) — Main "Process statements" page. CSV import, column mapping, transaction editor, category review, exclusion, export.
 - **`pages/home.py`** — Landing page with workflow instructions.
 - **`pages/overview.py`** — Metrics, charts, recent transaction editor.
 - **`pages/analytics.py`** — Date range selector, charts, searchable editor, CSV download.
@@ -25,9 +25,6 @@ uv run python -m unittest discover tests  # Run all tests
 - **`final_export.py`** — Standardized → categorized 9-col export. Merchant resolution (rules → persistent merchant mapping → fallback). Category resolution (rules → persistent category mapping → user edits). Map persistence (`save_approved_mappings()`). Exclusion logic. Composite label system (`CATEGORY_LABEL_TO_PAIR`/`CATEGORY_PAIR_TO_LABEL`).
 - **`cleaning_logic.py`** — Deterministic rules. `description_map` (~90 regex→merchant patterns), `sub_category_map`, `category_hierarchy` (12 categories), `clean_description_for_matching()`.
 - **`dashboard_data.py`** — Financial calculations for overview/analytics/budget pages.
-
-### Removed AI Modules
-The AI suggestion files (`ai_providers.py`, `ai_settings.py`, `merchant_assistance.py`) were removed. Review is manual; see `final_export.save_approved_mappings()` for the persistence layer.
 
 ### Utility Modules
 - **`bank_profiles.py`** — Read-only bank CSV format seed storage.

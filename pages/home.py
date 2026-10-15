@@ -25,8 +25,3 @@ st.info(
     "Imported transactions and budget targets are kept in your current Streamlit session. "
     "They are cleared when that session ends; download your categorized transactions to keep a copy."
 )
-st.caption(
-    "Merchant and category defaults come from the read-only master mapping provided with the app, so edits "
-    "in the session never change that mapping. AI merchant suggestions (bring your own provider key) are "
-    "optional; categorization rules, review, analytics, and budgeting work without AI."
-)
