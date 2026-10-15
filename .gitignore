@@ -3,4 +3,3 @@ __pycache__/
 *.py[cod]
 .data/
 all_banks_final_categorized.csv
-bank_profiles.json

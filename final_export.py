@@ -102,6 +102,8 @@ def normalize_bank_name(value: str) -> str:
         "goldenwest": "goldenwest",
         "goldenwestcreditunion": "goldenwest",
         "sofi": "sofi",
+        "usbank": "us bank",
+        "robinhood": "robinhood",
     }
     return known_banks.get(normalized, value.strip().casefold())
 

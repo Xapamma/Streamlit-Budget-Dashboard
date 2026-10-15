@@ -1,7 +1,9 @@
 """Read-only seed of reusable bank CSV import formats.
 
-Bank format profiles are seed data provided with the app. They are loaded each
-session and never written from the Streamlit UI.
+Bank format profiles are seed data provided with the app and committed to the
+repository as ``bank_profiles.json``, so every deployment — including the hosted
+Streamlit app — lists the same banks. They are loaded each session and never
+written from the Streamlit UI.
 """
 
 from __future__ import annotations

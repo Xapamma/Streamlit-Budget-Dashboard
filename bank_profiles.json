@@ -1,0 +1,28 @@
+{
+  "US Bank": {
+    "delimiter": "Auto-detect",
+    "amount_mode": "One signed amount column",
+    "positive_amounts_are_debits": false,
+    "number_format": "1,234.56 (US/UK)",
+    "account": "checking",
+    "mapping": {
+      "date": "Date",
+      "description": "Name",
+      "amount": "Amount"
+    }
+  },
+  "Robinhood": {
+    "delimiter": "Auto-detect",
+    "amount_mode": "One signed amount column",
+    "positive_amounts_are_debits": true,
+    "number_format": "1,234.56 (US/UK)",
+    "account": "credit card",
+    "mapping": {
+      "date": "Date",
+      "description": "Merchant",
+      "amount": "Amount",
+      "bank_category": "Type",
+      "status": "Status"
+    }
+  }
+}

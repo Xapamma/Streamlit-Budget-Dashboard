@@ -4,6 +4,21 @@ This project imports personal bank CSVs in a local Streamlit app, normalizes the
 
 ---
 
+## Live App
+
+This dashboard is hosted online — no install needed:
+
+**[https://budget-dashboard-4u.streamlit.app/](https://budget-dashboard-4u.streamlit.app/)**
+
+The hosted app runs the latest commit pushed to this repository; Streamlit
+Community Cloud redeploys automatically on push. Use it from any browser to
+process statements, review transactions, explore analytics, and plan monthly
+budgets. Sessions are temporary — data lives only in the active session and
+expires when it ends, so download your categorized CSV to keep a copy. To run
+the same app on your own machine, follow the [Setup](#setup) section below.
+
+---
+
 ## Features
 
 - Upload multiple bank CSVs and map each file's columns with dropdowns.
@@ -22,7 +37,7 @@ This project imports personal bank CSVs in a local Streamlit app, normalizes the
 
 ## Privacy
 
-Bank data is sensitive. `.data/`, the generated categorized CSV, and `bank_profiles.json` are ignored and excluded from version control for new commits. The app processes CSV data entirely locally — no data is sent to any external service. The merchant and category mappings (`merchant_cache.json`, `category_cache.json`) are updated in place when you apply reviewed transactions, so keep them in version control if you want your mapping history tracked. Files previously pushed to a remote remain in Git history unless that history is separately rewritten.
+Bank data is sensitive. When you run the app locally, CSV processing happens entirely on your machine — no data leaves it. The hosted app (**budget-dashboard-4u.streamlit.app**) processes the files you upload on Streamlit Community Cloud's servers for the duration of your browsing session; sessions are not stored and start fresh, so keep a downloaded copy of your categorized CSV. `.data/` and the generated categorized CSV are ignored and excluded from version control for new commits; `bank_profiles.json` is committed so every deployment — including the hosted app — lists every bank. The merchant and category mappings (`merchant_cache.json`, `category_cache.json`) are updated in place when you apply reviewed transactions, so keep them in version control if you want your mapping history tracked. Files previously pushed to a remote remain in Git history unless that history is separately rewritten.
 
 ## Project Structure
 - `dashboard.py`: multipage Streamlit entrypoint and navigation.
@@ -32,10 +47,10 @@ Bank data is sensitive. `.data/`, the generated categorized CSV, and `bank_profi
 - `transaction_import.py`: canonical transaction normalization and validation.
 - `final_export.py`: merchant resolution, exclusions, categories, validation, and export formatting.
 - `cleaning_logic.py`: merchant rules and category hierarchy.
-- `bank_profiles.py`: read-only bank CSV format seeds for built-in and custom banks.
+- `bank_profiles.py`: loader for the committed `bank_profiles.json` CSV format seeds.
 - `fuzzy_search.py`: shared fuzzy matching for local search fields.
 - `tests/test_transaction_import.py`: importer/exporter regression tests.
-- `.data/`, `bank_profiles.json`, and `all_banks_final_categorized.csv`: local data/artifacts; ignored by Git.
+- `.data/` and `all_banks_final_categorized.csv`: local data/artifacts; ignored by Git. `bank_profiles.json` is committed so all banks are listed on the hosted app.
 - `merchant_cache.json`, `category_cache.json`: master merchant/category mapping seeds (read-only).
 
 ---

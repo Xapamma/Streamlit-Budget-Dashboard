@@ -1,7 +1,7 @@
 # Streamlit Budget Dashboard — AI Agent Context
 
 ## Project Identity
-A multipage **Streamlit** app for normalizing bank-statement CSVs, categorizing transactions, providing analytics/budgeting, and allowing manual review of merchants and categories with automatic persistence of reviewed mappings. Python ≥ 3.13. Package manager: `uv`.
+A multipage **Streamlit** app for normalizing bank-statement CSVs, categorizing transactions, providing analytics/budgeting, and allowing manual review of merchants and categories with automatic persistence of reviewed mappings. Hosted online at **https://budget-dashboard-4u.streamlit.app/**. Python ≥ 3.13. Package manager: `uv`.
 
 ## Quick Commands
 ```bash
@@ -27,17 +27,18 @@ uv run python -m unittest discover tests  # Run all tests
 - **`dashboard_data.py`** — Financial calculations for overview/analytics/budget pages.
 
 ### Utility Modules
-- **`bank_profiles.py`** — Read-only bank CSV format seed storage.
+- **`bank_profiles.py`** — loader for the committed `bank_profiles.json` CSV format seeds.
 - **`fuzzy_search.py`** — `fuzzy_match_indices()` using RapidFuzz.
 - **`budget_export.py`** — `build_excel()` (OpenPyXL) and `build_pdf()` (ReportLab).
 
 ### Data Files
 Static seed data, loaded read-only each session and written at runtime when mapping edits are applied:
-- **`bank_profiles.json`** — `{bank: {delimiter, amount_mode, ...}}`
+- **`bank_profiles.py`** — read-only loader for the committed bank CSV format seeds
+- **`bank_profiles.json`** — `{bank: {delimiter, amount_mode, ...}}` (committed)
 - **`category_cache.json`** — `{normalized_description: {main_category, sub_category}}`
 - **`merchant_cache.json`** — `{normalized_description: merchant_name}`
 
-`bank_profiles.json` is Git-ignored; `category_cache.json` and `merchant_cache.json` are tracked mapping files.
+`bank_profiles.json`, `category_cache.json`, and `merchant_cache.json` are all committed, so the hosted app lists every bank and mapping.
 
 ## Critical Design Patterns
 

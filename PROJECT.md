@@ -6,6 +6,12 @@
 
 ## Quick Start
 
+The app is hosted online and requires no local setup:
+
+**[🔗 https://budget-dashboard-4u.streamlit.app/](https://budget-dashboard-4u.streamlit.app/)**
+
+To run the same app locally:
+
 ```bash
 uv sync
 uv run streamlit run dashboard.py
@@ -25,7 +31,7 @@ Streamlit-Budget-Dashboard/
 ├── cleaning_logic.py             # Deterministic merchant rules + category hierarchy
 ├── transaction_import.py         # CSV loading → standardized 13-column schema
 ├── final_export.py               # Standardized → categorized 9-col export + mapping persistence
-├── bank_profiles.py              # Read-only bank CSV format seeds (JSON)
+├── bank_profiles.py              # Loader for the committed bank CSV format seeds (JSON)
 ├── fuzzy_search.py               # RapidFuzz-based case-insensitive matching
 ├── dashboard_data.py             # Financial summaries for Overview, Analytics, Budget
 ├── budget_export.py              # PDF & Excel budget report generation
@@ -39,7 +45,7 @@ Streamlit-Budget-Dashboard/
 ├── tests/
 │   └── test_transaction_import.py # Integration + unit tests (1100+ lines)
 ├── .data/                        # [Git-ignored] local data directory
-├── bank_profiles.json            # [Git-ignored] seed bank CSV formats
+├── bank_profiles.json            # [Committed] seed bank CSV formats
 ├── category_cache.json           # Master seed: normalized description → category pair
 ├── merchant_cache.json           # Master seed: normalized description → merchant name
 └── all_banks_final_categorized.csv # [Git-ignored] exported download
@@ -117,7 +123,7 @@ pages/overview.py, analytics.py, budget.py — read editable_transactions
 ### `app.py` — CSV Import, Review & Export (~1511 lines)
 The largest module. Handles:
 1. **File upload** — Accepts `.csv` files via `st.file_uploader(multiple=True)`.
-2. **Bank selection** — Auto-detect from filename or manual pick (Capital One, Goldenwest, SoFi, Other).
+2. **Bank selection** — Auto-detect from filename or manual pick (Capital One, Goldenwest Credit Union, SoFi, US Bank, Robinhood, or Other).
 3. **Delimiter & number format** — Comma, semicolon, tab, pipe; US/UK vs European formats.
 4. **Column mapping** — Dropdowns to map CSV columns to canonical fields.
 5. **Sign convention** — Single signed amount vs split debit/credit columns.
@@ -158,7 +164,7 @@ The largest module. Handles:
 Category and merchant review is manual: unresolved transactions appear in a one-by-one review flow; applying changes saves them as persistent mappings (via `save_approved_mappings()`) so matching descriptions skip the review list in future imports.
 
 ### Supporting Modules
-- **`bank_profiles.py`** — `load_bank_profiles()` (read-only seed formats).
+- **`bank_profiles.py`** — `load_bank_profiles()` reads the committed `bank_profiles.json` seed formats.
 - **`fuzzy_search.py`** — `fuzzy_match_indices()` using RapidFuzz WRatio + partial_ratio.
 - **`dashboard_data.py`** — Financial calculations: `sort_rows_by_date()`, `prepare_analytics_transactions()`, `summarize_transactions()`, `trend_totals()`, `spending_by_main_category()`, `apply_transaction_category_edits()`.
 - **`budget_export.py`** — `build_excel()` (OpenPyXL) and `build_pdf()` (ReportLab) from `build_budget_rows()`.

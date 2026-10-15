@@ -65,8 +65,15 @@ BANK_OPTIONS = [
     "Capital One",
     "Goldenwest Credit Union",
     "SoFi",
+    "US Bank",
+    "Robinhood",
     "Other / new bank",
 ]
+# Placeholder labels used in the one-by-one flagged-transaction review flow.
+# Categories start blank so a reviewer must explicitly choose them instead of
+# silently accepting the first dropdown option.
+MAIN_CATEGORY_PLACEHOLDER = "Select a main category…"
+SUB_CATEGORY_PLACEHOLDER = "Select a sub-category…"
 ACCOUNT_OPTIONS = [
     "Select an account type",
     "Checking",
@@ -157,6 +164,8 @@ def detect_bank(filename: str) -> str:
         ("gwcu", "Goldenwest Credit Union"),
         ("goldenwest", "Goldenwest Credit Union"),
         ("sofi", "SoFi"),
+        ("usbank", "US Bank"),
+        ("robinhood", "Robinhood"),
     ):
         if token in normalized:
             return bank
@@ -385,10 +394,20 @@ if uploaded_files:
         st.error("Two uploaded files have the same name. Remove or rename one so each statement can be tracked safely.")
     file_digest = hashlib.sha256(content).hexdigest()
     detected_bank = detect_bank(selected_file.name)
+    built_in_banks = [
+        name
+        for name in BANK_OPTIONS
+        if name not in ("Auto-detect from filename", "Other / new bank")
+    ]
     custom_bank_names = sorted(
-        name for name in bank_profiles if name not in BANK_OPTIONS
+        name for name in bank_profiles if name not in built_in_banks
     )
-    bank_options = [*BANK_OPTIONS[:4], *custom_bank_names, BANK_OPTIONS[-1]]
+    bank_options = [
+        "Auto-detect from filename",
+        *built_in_banks,
+        *custom_bank_names,
+        "Other / new bank",
+    ]
     detected_bank_choice = detected_bank if detected_bank in bank_options else BANK_OPTIONS[-1]
     bank_key = f"bank_{file_digest[:12]}"
     bank_index = bank_options.index(detected_bank_choice)
@@ -1117,9 +1136,10 @@ if (
         expanded=st.session_state.review_expanded,
     ):
         st.caption(
-            "Set the merchant and category for each transaction below. Mappings are stored "
-            "for this session only — they are not saved to disk and expire when you close "
-            "the browser."
+            "Set the merchant and category for each transaction below. Categories start "
+            "blank so you choose them explicitly — a selection is never pre-filled. "
+            "Mappings are stored for this session only — they are not saved to disk and "
+            "expire when you close the browser."
         )
 
         if not candidate_rows:
@@ -1150,9 +1170,12 @@ if (
             st.progress(reviewed_so_far / max(review_total, 1), text=progress_text)
 
             # Exclude "General Spending" from the dropdown — it is a default fallback,
-            # not a legitimate category choice for the review flow.
+            # not a legitimate category choice for the review flow. Start the flagged
+            # category inputs on placeholder options so the reviewer must explicitly
+            # choose a category instead of accepting the first option by accident.
             review_main_options = [
-                c for c in FINAL_MAIN_CATEGORY_OPTIONS if c != "General Spending"
+                MAIN_CATEGORY_PLACEHOLDER,
+                *[c for c in FINAL_MAIN_CATEGORY_OPTIONS if c != "General Spending"],
             ]
 
             with st.container(border=True):
@@ -1181,24 +1204,33 @@ if (
 
                 cat_cols = st.columns(2)
                 with cat_cols[0]:
+                    current_main = str(row["main_category"])
                     main_category = st.selectbox(
                         "Main category",
                         review_main_options,
                         index=(
-                            review_main_options.index(row['main_category'])
-                            if row['main_category'] in review_main_options
+                            review_main_options.index(current_main)
+                            if current_main in review_main_options
                             else 0
                         ),
                         key=f"flag_main_cat_{current_idx}",
                     )
                 with cat_cols[1]:
-                    sub_options = sorted(CATEGORY_SUBCATEGORIES.get(main_category, []))
+                    if main_category in CATEGORY_SUBCATEGORIES:
+                        sub_options = [
+                            SUB_CATEGORY_PLACEHOLDER,
+                            *sorted(CATEGORY_SUBCATEGORIES[main_category]),
+                        ]
+                    else:
+                        sub_options = [SUB_CATEGORY_PLACEHOLDER]
+                    current_sub = str(row["sub_category"])
                     sub_category = st.selectbox(
                         "Sub-category",
                         sub_options,
                         index=(
-                            sub_options.index(row['sub_category'])
-                            if row['sub_category'] in sub_options
+                            sub_options.index(current_sub)
+                            if current_sub in sub_options
+                            and main_category in CATEGORY_SUBCATEGORIES
                             else 0
                         ),
                         key=f"flag_sub_cat_{current_idx}",
@@ -1206,6 +1238,12 @@ if (
 
             def save_current() -> None:
                 """Validate and save the current transaction, then rerun so it leaves the queue."""
+                if main_category == MAIN_CATEGORY_PLACEHOLDER:
+                    st.error("Choose a main category before applying.")
+                    return
+                if sub_category == SUB_CATEGORY_PLACEHOLDER:
+                    st.error("Choose a sub-category before applying.")
+                    return
                 problem = edited_row_problem(merchant_input, main_category, sub_category)
                 if problem:
                     st.error(f"Cannot apply: {problem}. Fix it first.")
