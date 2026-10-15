@@ -98,6 +98,8 @@ DROPPED_REVIEW_COLUMNS = FINAL_EXPORT_COLUMNS + [
 ]
 EDITABLE_SOURCE_COLUMNS = ["_source_file", "_source_row", "_category_reviewed"]
 EDITABLE_COLUMNS = FINAL_EXPORT_COLUMNS + EDITABLE_SOURCE_COLUMNS
+EDIT_APPLY_ALL = "All matching"
+EDIT_APPLY_ONLY_THIS_ROW = "Only this row"
 HEADER_SUGGESTIONS = {
     "date": ("date", "transaction date", "posting date", "effective date", "activity date"),
     "posted_date": ("posted date", "effective date", "date posted", "posting date"),
@@ -752,6 +754,7 @@ if (
         CATEGORY_PAIR_TO_LABEL.get((str(main), str(sub)), "")
         for main, sub in zip(editable["main_category"], editable["sub_category"])
     ]
+    editor_data["_apply_to"] = EDIT_APPLY_ALL
     search_query = st.text_input(
         "Search transactions",
         placeholder="Description, merchant, category, amount...",
@@ -780,12 +783,35 @@ if (
         set(editable["bank"].dropna().astype(str))
         | {normalize_bank_name(bank) for bank in transactions["bank"].dropna().astype(str)}
     )
+    edit_mode = st.session_state.get("editor_edit_mode", False)
+    save_clicked = False
+
+    toolbar_cols = st.columns([1, 2, 5])
+    with toolbar_cols[0]:
+        if edit_mode:
+            if st.button("Save changes", type="primary"):
+                save_clicked = True
+        else:
+            if st.button("Edit table"):
+                st.session_state.editor_edit_mode = True
+                st.rerun()
+    if edit_mode:
+        st.caption(
+            "Editing in progress \u2014 nothing is saved until you press **Save changes**. "
+            "Choose a category in the **Sub-category (Main :: Sub)** column; Main category "
+            "is derived from it automatically, so they can never disagree. By default "
+            "**Apply to** is **All matching**, so a category change updates every "
+            "transaction with the same description; set it to **Only this row** to make "
+            "the edit a one-time occurrence. General Spending isn't offered in the table."
+        )
+
     edited_editor_data = st.data_editor(
         visible_editor_data,
         key=f"export_editor_{st.session_state.export_editor_revision}",
         num_rows="fixed" if search_query else "dynamic",
         width='stretch',
         hide_index=True,
+        disabled=not edit_mode,
         column_config={
             "row_number": st.column_config.NumberColumn("Row", disabled=True, width="small"),
             "date": st.column_config.TextColumn("Date (MM/DD/YYYY)", required=True),
@@ -795,14 +821,28 @@ if (
                 "Type", options=["debit", "credit"], required=True
             ),
             "amount": st.column_config.NumberColumn("Amount", format="$%.2f", required=True),
-            "main_category": st.column_config.SelectboxColumn(
-                "Main category", options=[c for c in FINAL_MAIN_CATEGORY_OPTIONS if c != "General Spending"], required=True
-            ),
+            "main_category": None,
             "sub_category": st.column_config.SelectboxColumn(
-                "Sub-category (Main :: Sub)", options=CATEGORY_PAIR_OPTIONS, required=True
+                "Sub-category (Main :: Sub)",
+                options=(
+                    CATEGORY_PAIR_OPTIONS
+                    if not edit_mode
+                    else [label for label in CATEGORY_PAIR_OPTIONS if not label.startswith("General Spending")]
+                ),
+                required=True,
             ),
             "bank": st.column_config.SelectboxColumn("Bank", options=bank_options, required=True),
             "account": st.column_config.SelectboxColumn("Account", options=account_options, required=True),
+            "_apply_to": st.column_config.SelectboxColumn(
+                "Apply to",
+                options=[EDIT_APPLY_ALL, EDIT_APPLY_ONLY_THIS_ROW],
+                default=EDIT_APPLY_ALL,
+                help=(
+                    "\"All matching\" applies a category change to every transaction with the "
+                    "same description. \"Only this row\" makes it a one-time edit that changes "
+                    "just this transaction."
+                ),
+            ),
             "_category_reviewed": None,
             "_source_file": None,
             "_source_row": None,
@@ -814,133 +854,169 @@ if (
         edited_editor_data = all_editor_data.reset_index()
     elif search_query:
         edited_editor_data = editor_data
-    original_editor_data = editor_data.set_index("row_number")
-    editor_row_numbers = edited_editor_data["row_number"].reset_index(drop=True)
-    edited_source_metadata = edited_editor_data[EDITABLE_SOURCE_COLUMNS].reset_index(drop=True)
-    edited_transactions = edited_editor_data.drop(
-        columns=["row_number", *EDITABLE_SOURCE_COLUMNS]
-    ).copy()
-    reviewed_categories = edited_source_metadata["_category_reviewed"].fillna(False).astype(bool)
-    reviewed_categories.loc[
-        edited_transactions["main_category"].astype(str) != "General Spending"
-    ] = True
-    edited_source_metadata["_category_reviewed"] = reviewed_categories
-    transfer_mask = (
-        edited_transactions["main_category"].astype("string").str.strip().eq("Transfer").fillna(False)
-    )
-    transfers_moved = bool(transfer_mask.any())
-    edited_transactions.loc[transfer_mask, "sub_category"] = CATEGORY_PAIR_TO_LABEL[("Transfer", "N/A")]
-    category_pairs = edited_transactions["sub_category"].map(CATEGORY_LABEL_TO_PAIR)
-    pair_mismatch = category_pairs.map(
-        lambda pair: isinstance(pair, tuple)
-    ) & category_pairs.map(
-        lambda pair: pair[0] if isinstance(pair, tuple) else None
-    ).ne(edited_transactions["main_category"])
-    edited_transactions["sub_category"] = category_pairs.map(
-        lambda pair: pair[1] if isinstance(pair, tuple) else pd.NA
-    )
-    for row_position, row in edited_transactions.iterrows():
-        if pair_mismatch.iloc[row_position] or row["main_category"] == "Transfer":
-            continue
-        editor_row_number = editor_row_numbers.iloc[row_position]
-        if pd.isna(editor_row_number) or editor_row_number not in original_editor_data.index:
-            continue
-        original_row = original_editor_data.loc[editor_row_number]
-        old_pair = CATEGORY_LABEL_TO_PAIR.get(str(original_row["sub_category"]))
-        new_pair = (str(row["main_category"]), str(row["sub_category"]))
-        was_reviewed = original_row["_category_reviewed"]
-        is_reviewed = edited_source_metadata.at[row_position, "_category_reviewed"]
-        was_reviewed = False if pd.isna(was_reviewed) else bool(was_reviewed)
-        is_reviewed = False if pd.isna(is_reviewed) else bool(is_reviewed)
-        if not is_reviewed or (old_pair == new_pair and was_reviewed):
-            continue
-        description = str(row["description"])
-        normalized_description = clean_description_for_matching(description)
-        if not normalized_description:
-            continue
-        # Category choices update this session's transactions only; the master
-        # category mapping is read-only and is never modified from the app.
-        matching_rows = edited_transactions["description"].map(
-            lambda value: clean_description_for_matching(str(value))
-        ).eq(normalized_description)
-        edited_transactions.loc[matching_rows, "main_category"] = new_pair[0]
-        edited_transactions.loc[matching_rows, "sub_category"] = new_pair[1]
-        edited_source_metadata.loc[matching_rows, "_category_reviewed"] = True
-        pair_mismatch.loc[matching_rows] = False
-    edited_transactions = edited_transactions[FINAL_EXPORT_COLUMNS]
 
-    # Persist mappings the user actively changed in the main editor so future
-    # imports reuse them and matching descriptions leave the review queue.
-    change_rows = []
-    for row_position, row in edited_transactions.iterrows():
-        editor_row_number = editor_row_numbers.iloc[row_position]
-        if pd.isna(editor_row_number) or editor_row_number not in original_editor_data.index:
-            continue
-        original_row = original_editor_data.loc[editor_row_number]
-        merchant_changed = str(original_row["merchant"]) != str(row["merchant"])
-        current_label = CATEGORY_PAIR_TO_LABEL.get(
-            (str(row["main_category"]), str(row["sub_category"])), ""
+    if edit_mode and not save_clicked:
+        # Drafting: edits stay in the widget and are NOT committed. Downstream
+        # review, validation, and download all use the last-saved data, so no
+        # errors flash during editing and the screen does not re-sort/reload.
+        edited_transactions = editable[FINAL_EXPORT_COLUMNS].copy()
+        edited_source_metadata = editable[EDITABLE_SOURCE_COLUMNS].copy().reset_index(drop=True)
+        editor_row_numbers = editor_data["row_number"].reset_index(drop=True)
+        pair_mismatch = pd.Series(False, index=edited_transactions.index)
+    else:
+        # Not in edit mode (read-only table) or Save pressed: commit the editor
+        # contents to the session.
+        original_editor_data = editor_data.set_index("row_number")
+        editor_row_numbers = edited_editor_data["row_number"].reset_index(drop=True)
+        edited_source_metadata = edited_editor_data[EDITABLE_SOURCE_COLUMNS].reset_index(drop=True)
+        apply_flags = (
+            edited_editor_data["_apply_to"].fillna(EDIT_APPLY_ALL).astype(str)
+            == EDIT_APPLY_ONLY_THIS_ROW
         )
-        category_changed = str(original_row["sub_category"]) != current_label
-        was_reviewed = (
-            False if pd.isna(original_row["_category_reviewed"])
-            else bool(original_row["_category_reviewed"])
+        edited_transactions = edited_editor_data.drop(
+            columns=["row_number", "_apply_to", *EDITABLE_SOURCE_COLUMNS]
+        ).copy()
+
+        # The composite "Main :: Sub" column is the single category input, so
+        # Main category is always derived from it and can never disagree with
+        # the sub-category the user picked.
+        category_pairs = edited_transactions["sub_category"].map(CATEGORY_LABEL_TO_PAIR)
+        edited_transactions["main_category"] = category_pairs.map(
+            lambda pair: pair[0] if isinstance(pair, tuple) else pd.NA
         )
-        is_reviewed = bool(edited_source_metadata.at[row_position, "_category_reviewed"])
-        if merchant_changed or category_changed or (is_reviewed and not was_reviewed):
-            change_rows.append(
-                {
-                    "description": row["description"],
-                    "merchant": row["merchant"],
-                    "main_category": row["main_category"],
-                    "sub_category": row["sub_category"],
-                }
+        edited_transactions["sub_category"] = category_pairs.map(
+            lambda pair: pair[1] if isinstance(pair, tuple) else pd.NA
+        )
+        pair_mismatch = pd.Series(False, index=edited_transactions.index)
+
+        reviewed_categories = edited_source_metadata["_category_reviewed"].fillna(False).astype(bool)
+        reviewed_categories.loc[
+            edited_transactions["main_category"].astype(str) != "General Spending"
+        ] = True
+        edited_source_metadata["_category_reviewed"] = reviewed_categories
+        transfer_mask = (
+            edited_transactions["main_category"].astype("string").str.strip().eq("Transfer").fillna(False)
+        )
+        transfers_moved = bool(transfer_mask.any())
+        edited_transactions.loc[transfer_mask, "sub_category"] = CATEGORY_PAIR_TO_LABEL[("Transfer", "N/A")]
+
+        # Propagate a category pair to every row that shares the same description
+        # so bulk category edits stay consistent within the session. Rows set to
+        # "Only this row" are one-time edits and are excluded both as sources and
+        # as targets of that propagation.
+        for row_position, row in edited_transactions.iterrows():
+            if row["main_category"] == "Transfer":
+                continue
+            if apply_flags.iloc[row_position]:
+                continue
+            editor_row_number = editor_row_numbers.iloc[row_position]
+            if pd.isna(editor_row_number) or editor_row_number not in original_editor_data.index:
+                continue
+            original_row = original_editor_data.loc[editor_row_number]
+            old_pair = CATEGORY_LABEL_TO_PAIR.get(str(original_row["sub_category"]))
+            new_pair = (str(row["main_category"]), str(row["sub_category"]))
+            was_reviewed = original_row["_category_reviewed"]
+            is_reviewed = edited_source_metadata.at[row_position, "_category_reviewed"]
+            was_reviewed = False if pd.isna(was_reviewed) else bool(was_reviewed)
+            is_reviewed = False if pd.isna(is_reviewed) else bool(is_reviewed)
+            if not is_reviewed or (old_pair == new_pair and was_reviewed):
+                continue
+            description = str(row["description"])
+            normalized_description = clean_description_for_matching(description)
+            if not normalized_description:
+                continue
+            # Category choices update this session's transactions only; the master
+            # category mapping is read-only and is never modified from the app.
+            matching_rows = edited_transactions["description"].map(
+                lambda value: clean_description_for_matching(str(value))
+            ).eq(normalized_description)
+            matching_rows = matching_rows & ~apply_flags
+            edited_transactions.loc[matching_rows, "main_category"] = new_pair[0]
+            edited_transactions.loc[matching_rows, "sub_category"] = new_pair[1]
+            edited_source_metadata.loc[matching_rows, "_category_reviewed"] = True
+            pair_mismatch.loc[matching_rows] = False
+
+        edited_transactions = edited_transactions[FINAL_EXPORT_COLUMNS]
+
+        # Persist mappings the user actively changed in the main editor so future
+        # imports reuse them and matching descriptions leave the review queue.
+        change_rows = []
+        for row_position, row in edited_transactions.iterrows():
+            if apply_flags.iloc[row_position]:
+                continue
+            editor_row_number = editor_row_numbers.iloc[row_position]
+            if pd.isna(editor_row_number) or editor_row_number not in original_editor_data.index:
+                continue
+            original_row = original_editor_data.loc[editor_row_number]
+            merchant_changed = str(original_row["merchant"]) != str(row["merchant"])
+            current_label = CATEGORY_PAIR_TO_LABEL.get(
+                (str(row["main_category"]), str(row["sub_category"])), ""
             )
-    if change_rows:
-        for change_row in change_rows:
-            cleaned_desc = clean_description_for_matching(str(change_row["description"]))
-            if cleaned_desc:
-                st.session_state.session_merchant_cache[cleaned_desc] = str(change_row["merchant"])
-                st.session_state.session_category_cache[cleaned_desc] = {
-                    "main_category": change_row["main_category"],
-                    "sub_category": change_row["sub_category"],
-                }
+            category_changed = str(original_row["sub_category"]) != current_label
+            was_reviewed = (
+                False if pd.isna(original_row["_category_reviewed"])
+                else bool(original_row["_category_reviewed"])
+            )
+            is_reviewed = bool(edited_source_metadata.at[row_position, "_category_reviewed"])
+            if merchant_changed or category_changed or (is_reviewed and not was_reviewed):
+                change_rows.append(
+                    {
+                        "description": row["description"],
+                        "merchant": row["merchant"],
+                        "main_category": row["main_category"],
+                        "sub_category": row["sub_category"],
+                    }
+                )
+        if change_rows:
+            for change_row in change_rows:
+                cleaned_desc = clean_description_for_matching(str(change_row["description"]))
+                if cleaned_desc:
+                    st.session_state.session_merchant_cache[cleaned_desc] = str(change_row["merchant"])
+                    st.session_state.session_category_cache[cleaned_desc] = {
+                        "main_category": change_row["main_category"],
+                        "sub_category": change_row["sub_category"],
+                    }
 
-    edited_transactions = edited_transactions.reset_index(drop=True)
-    if transfers_moved:
-        transfer_rows = make_transfer_review_rows(
-            edited_transactions.loc[transfer_mask].reset_index(drop=True),
-            source_files=edited_source_metadata.loc[transfer_mask, "_source_file"],
-            source_rows=edited_source_metadata.loc[transfer_mask, "_source_row"],
-        )
-        st.session_state.dropped_transactions = pd.concat(
-            [st.session_state.dropped_transactions, transfer_rows], ignore_index=True
-        )
-        st.session_state.pop(
-            f"dropped_editor_{st.session_state.dropped_editor_revision}", None
-        )
-        st.session_state.dropped_editor_revision += 1
-        edited_transactions = edited_transactions.loc[~transfer_mask].reset_index(drop=True)
-        edited_source_metadata = edited_source_metadata.loc[~transfer_mask].reset_index(drop=True)
-        editor_row_numbers = editor_row_numbers.loc[~transfer_mask].reset_index(drop=True)
-        pair_mismatch = pair_mismatch.loc[~transfer_mask].reset_index(drop=True)
-        st.info(f"Moved {int(transfer_mask.sum())} manually marked transfer(s) to the excluded transaction review list.")
+        edited_transactions = edited_transactions.reset_index(drop=True)
+        if transfers_moved:
+            transfer_rows = make_transfer_review_rows(
+                edited_transactions.loc[transfer_mask].reset_index(drop=True),
+                source_files=edited_source_metadata.loc[transfer_mask, "_source_file"],
+                source_rows=edited_source_metadata.loc[transfer_mask, "_source_row"],
+            )
+            st.session_state.dropped_transactions = pd.concat(
+                [st.session_state.dropped_transactions, transfer_rows], ignore_index=True
+            )
+            st.session_state.pop(
+                f"dropped_editor_{st.session_state.dropped_editor_revision}", None
+            )
+            st.session_state.dropped_editor_revision += 1
+            edited_transactions = edited_transactions.loc[~transfer_mask].reset_index(drop=True)
+            edited_source_metadata = edited_source_metadata.loc[~transfer_mask].reset_index(drop=True)
+            editor_row_numbers = editor_row_numbers.loc[~transfer_mask].reset_index(drop=True)
+            pair_mismatch = pair_mismatch.loc[~transfer_mask].reset_index(drop=True)
+            st.info(f"Moved {int(transfer_mask.sum())} manually marked transfer(s) to the excluded transaction review list.")
 
-    date_order = sort_rows_by_date(edited_transactions).index
-    date_order_changed = not date_order.equals(edited_transactions.index)
-    if date_order_changed:
-        edited_transactions = edited_transactions.loc[date_order].reset_index(drop=True)
-        edited_source_metadata = edited_source_metadata.loc[date_order].reset_index(drop=True)
-        editor_row_numbers = editor_row_numbers.loc[date_order].reset_index(drop=True)
-        pair_mismatch = pair_mismatch.loc[date_order].reset_index(drop=True)
+        date_order = sort_rows_by_date(edited_transactions).index
+        date_order_changed = not date_order.equals(edited_transactions.index)
+        if date_order_changed:
+            edited_transactions = edited_transactions.loc[date_order].reset_index(drop=True)
+            edited_source_metadata = edited_source_metadata.loc[date_order].reset_index(drop=True)
+            editor_row_numbers = editor_row_numbers.loc[date_order].reset_index(drop=True)
+            pair_mismatch = pair_mismatch.loc[date_order].reset_index(drop=True)
 
-    st.session_state.editable_transactions = pd.concat(
-        [edited_transactions, edited_source_metadata], axis=1
-    )[EDITABLE_COLUMNS]
-    if transfers_moved or date_order_changed:
-        st.session_state.pop(f"export_editor_{st.session_state.export_editor_revision}", None)
-        st.session_state.export_editor_revision += 1
-        st.rerun()
+        st.session_state.editable_transactions = pd.concat(
+            [edited_transactions, edited_source_metadata], axis=1
+        )[EDITABLE_COLUMNS]
+        if save_clicked:
+            st.session_state.editor_edit_mode = False
+            st.session_state.pop(f"export_editor_{st.session_state.export_editor_revision}", None)
+            st.session_state.export_editor_revision += 1
+            st.rerun()
+        if transfers_moved or date_order_changed:
+            st.session_state.pop(f"export_editor_{st.session_state.export_editor_revision}", None)
+            st.session_state.export_editor_revision += 1
+            st.rerun()
 
     candidate_rows = [
         index
