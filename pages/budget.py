@@ -50,18 +50,10 @@ if "monthly_income_by_month" not in st.session_state:
     st.session_state.monthly_income_by_month = (
         {budget_month_key: float(legacy_income)} if legacy_income is not None else {}
     )
-if "removed_budget_categories_by_month" not in st.session_state:
-    legacy_removed = st.session_state.get("removed_budget_categories", set())
-    st.session_state.removed_budget_categories_by_month = (
-        {budget_month_key: set(legacy_removed)} if legacy_removed else {}
-    )
 st.session_state.monthly_budgets = st.session_state.monthly_budgets_by_month.setdefault(
     budget_month_key, {}
 )
 st.session_state.monthly_income = st.session_state.monthly_income_by_month.get(budget_month_key)
-st.session_state.removed_budget_categories = st.session_state.removed_budget_categories_by_month.setdefault(
-    budget_month_key, set()
-)
 
 income_sources = list(category_hierarchy["Income"])
 source_budget_keys = {source: f"Income :: {source}" for source in income_sources}
@@ -88,7 +80,6 @@ if monthly_income is None:
     monthly_income = sum(
         float(st.session_state.monthly_budgets.get(source_budget_keys[source], 0.0))
         for source in income_sources
-        if source_budget_keys[source] not in st.session_state.removed_budget_categories
     )
 
 budget_main_categories = [
@@ -106,18 +97,12 @@ if not month_transactions.empty:
         if main_category not in budget_main_categories or main_category == "Income":
             continue
         main_spending = float(-main_rows["amount"].sum())
-        if (
-            main_category not in st.session_state.monthly_budgets
-            and main_category not in st.session_state.removed_budget_categories
-        ):
+        if main_category not in st.session_state.monthly_budgets:
             st.session_state.monthly_budgets[main_category] = main_spending
             seeded_any = True
         for subcategory, subcategory_rows in main_rows.groupby("sub_category"):
             category_path = f"{main_category} :: {subcategory}"
-            if (
-                category_path not in st.session_state.monthly_budgets
-                and category_path not in st.session_state.removed_budget_categories
-            ):
+            if category_path not in st.session_state.monthly_budgets:
                 st.session_state.monthly_budgets[category_path] = float(
                     -subcategory_rows["amount"].sum()
                 )
@@ -138,10 +123,7 @@ if not month_transactions.empty:
     )
     for source, subcategory_rows in month_income.groupby("budget_source"):
         category_path = f"Income :: {source}"
-        if (
-            category_path not in st.session_state.monthly_budgets
-            and category_path not in st.session_state.removed_budget_categories
-        ):
+        if category_path not in st.session_state.monthly_budgets:
             st.session_state.monthly_budgets[category_path] = float(
                 subcategory_rows["amount"].sum()
             )
@@ -164,7 +146,6 @@ def current_subcategory_limits(main_category: str) -> dict[str, float]:
         subcategory: float(st.session_state.monthly_budgets[f"{main_category} :: {subcategory}"])
         for subcategory in subcategories
         if f"{main_category} :: {subcategory}" in st.session_state.monthly_budgets
-        and f"{main_category} :: {subcategory}" not in st.session_state.removed_budget_categories
     }
 
 
@@ -188,31 +169,19 @@ for main_category in budget_main_categories:
     with st.expander(f"{main_category} · {label_amount}", expanded=main_category == "Income"):
         if main_category == "Income":
             st.caption("Set a monthly amount for each income source below.")
-        elif main_category not in st.session_state.removed_budget_categories:
-            main_columns = st.columns([5, 1])
-            with main_columns[0]:
-                monthly_limit = st.number_input(
-                    f"Total monthly limit ($) · {main_category}",
-                    min_value=0.0,
-                    value=float(st.session_state.monthly_budgets.get(main_category, 0.0)),
-                    step=25.0,
-                    format="%.2f",
-                    key=f"budget_limit_{st.session_state.budget_editor_revision}_{main_category}",
-                )
-                if monthly_limit is not None and monthly_limit > 0:
-                    st.session_state.monthly_budgets[main_category] = float(monthly_limit)
-                else:
-                    st.session_state.monthly_budgets.pop(main_category, None)
-            with main_columns[1]:
-                if st.button(
-                    "Remove",
-                    key=f"remove_budget_{st.session_state.budget_editor_revision}_{main_category}",
-                    help="Hide this main-category limit. You can add it back below.",
-                ):
-                    st.session_state.removed_budget_categories.add(main_category)
-                    st.session_state.monthly_budgets.pop(main_category, None)
-                    st.session_state.budget_editor_revision += 1
-                    st.rerun()
+        else:
+            monthly_limit = st.number_input(
+                f"Total monthly limit ($) · {main_category}",
+                min_value=0.0,
+                value=float(st.session_state.monthly_budgets.get(main_category, 0.0)),
+                step=25.0,
+                format="%.2f",
+                key=f"budget_limit_{st.session_state.budget_editor_revision}_{main_category}",
+            )
+            if monthly_limit is not None and monthly_limit > 0:
+                st.session_state.monthly_budgets[main_category] = float(monthly_limit)
+            else:
+                st.session_state.monthly_budgets.pop(main_category, None)
 
         subcategories = category_hierarchy[main_category]
         with st.expander(
@@ -221,32 +190,18 @@ for main_category in budget_main_categories:
         ):
             for subcategory in subcategories:
                 category_path = f"{main_category} :: {subcategory}"
-                if category_path in st.session_state.removed_budget_categories:
-                    continue
-                subcategory_columns = st.columns([5, 1])
-                with subcategory_columns[0]:
-                    monthly_limit = st.number_input(
-                        f"Monthly limit ($) · {subcategory}",
-                        min_value=0.0,
-                        value=float(st.session_state.monthly_budgets.get(category_path, 0.0)),
-                        step=25.0,
-                        format="%.2f",
-                        key=f"budget_limit_{st.session_state.budget_editor_revision}_{category_path}",
-                    )
-                    if monthly_limit is not None and monthly_limit > 0:
-                        st.session_state.monthly_budgets[category_path] = float(monthly_limit)
-                    else:
-                        st.session_state.monthly_budgets.pop(category_path, None)
-                with subcategory_columns[1]:
-                    if st.button(
-                        "Remove",
-                        key=f"remove_budget_{st.session_state.budget_editor_revision}_{category_path}",
-                        help="Hide this subcategory limit. You can add it back below.",
-                    ):
-                        st.session_state.removed_budget_categories.add(category_path)
-                        st.session_state.monthly_budgets.pop(category_path, None)
-                        st.session_state.budget_editor_revision += 1
-                        st.rerun()
+                monthly_limit = st.number_input(
+                    f"Monthly limit ($) · {subcategory}",
+                    min_value=0.0,
+                    value=float(st.session_state.monthly_budgets.get(category_path, 0.0)),
+                    step=25.0,
+                    format="%.2f",
+                    key=f"budget_limit_{st.session_state.budget_editor_revision}_{category_path}",
+                )
+                if monthly_limit is not None and monthly_limit > 0:
+                    st.session_state.monthly_budgets[category_path] = float(monthly_limit)
+                else:
+                    st.session_state.monthly_budgets.pop(category_path, None)
 
             # Auto "Other" subcategory: whenever the main-category limit exceeds the combined
             # subcategory limits, surface the difference as a read-only "Other" row.
@@ -255,23 +210,18 @@ for main_category in budget_main_categories:
             auto_subtotal = sum(subcategory_limits.values())
             other_value = round(auto_parent - auto_subtotal, 2)
             if main_category != "Income" and other_value > 0:
-                other_columns = st.columns([5, 1])
-                with other_columns[0]:
-                    st.number_input(
-                        f"Monthly limit ($) · Other",
-                        min_value=0.0,
-                        value=other_value,
-                        step=25.0,
-                        format="%.2f",
-                        disabled=True,
-                        key=(
-                            f"budget_other_"
-                            f"{st.session_state.budget_editor_revision}"
-                            f"_{main_category}"
-                        ),
-                    )
-                with other_columns[1]:
-                    st.caption("Auto")
+                st.number_input(
+                    f"Monthly limit ($) · Other",
+                    min_value=0.0,
+                    value=other_value,
+                    format="%.2f",
+                    disabled=True,
+                    key=(
+                        f"budget_other_"
+                        f"{st.session_state.budget_editor_revision}"
+                        f"_{main_category}"
+                    ),
+                )
                 st.caption(
                     "'Other' automatically covers the difference between the main-category "
                     "limit and the combined subcategory limits."
@@ -298,10 +248,7 @@ for main_category in budget_main_categories:
 
     effective_limit = max(parent_limit, subcategory_total)
     actual_spending = spending_for_budget_category(month_transactions, main_category)
-    if (
-        main_category not in st.session_state.removed_budget_categories
-        and effective_limit > 0
-    ):
+    if effective_limit > 0:
         required_limit = max(effective_limit, actual_spending)
         if required_limit > parent_limit:
             st.session_state.monthly_budgets[main_category] = required_limit
@@ -309,8 +256,6 @@ for main_category in budget_main_categories:
             auto_adjustments.append((main_category, required_limit))
         else:
             category_allocations[main_category] = effective_limit
-    elif effective_limit > 0:
-        category_allocations[main_category] = effective_limit
 
 income_source_limits = current_subcategory_limits("Income")
 subcategory_limits_by_main["Income"] = income_source_limits
@@ -328,14 +273,6 @@ if auto_adjustments:
     )
     st.session_state.budget_editor_revision += 1
     st.rerun()
-
-if st.session_state.removed_budget_categories:
-    removed_options = sorted(st.session_state.removed_budget_categories)
-    restore_category = st.selectbox("Add a removed category back", removed_options)
-    if st.button("Add category back"):
-        st.session_state.removed_budget_categories.remove(restore_category)
-        st.session_state.budget_editor_revision += 1
-        st.rerun()
 
 expense_allocation = sum(
     amount for category, amount in category_allocations.items() if category != "Income"
@@ -436,7 +373,6 @@ if monthly_income is not None:
             st.session_state.monthly_budgets["Savings & Investments"] = (
                 savings_budget + income_remaining
             )
-            st.session_state.removed_budget_categories.discard("Savings & Investments")
             st.session_state.budget_editor_revision += 1
             st.rerun()
     else:

@@ -248,7 +248,6 @@ Displayed as `"Main :: Sub"` composite labels:
 |-----|-------------|
 | `monthly_budgets_by_month` | `{YYYY-MM: {category: limit}}` |
 | `monthly_income_by_month` | `{YYYY-MM: float}` |
-| `removed_budget_categories_by_month` | `{YYYY-MM: set(categories)}` |
 
 ### Widget Revision Counters
 `export_editor_revision`, `dropped_editor_revision`, `overview_recent_editor_revision`, `analytics_transaction_editor_revision`, `budget_editor_revision`, `budget_editor_schema_version`

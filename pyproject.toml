@@ -1,7 +1,7 @@
 [project]
 name = "bank-statement-processor"
 version = "0.1.0"
-description = "Add your description here"
+description = "Multipage Streamlit app for normalizing bank-statement CSVs, categorizing transactions, and monthly budget planning"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
